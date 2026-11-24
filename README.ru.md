@@ -1,3 +1,5 @@
+![RTX Video Player — редакции VFG и RIFE](assets/banner.png)
+
 # RTX Video Player
 
 [English](README.md) · [Скачать v1.1.0](https://github.com/Yamidashka/rtx-video-player/releases/tag/v1.1.0)
