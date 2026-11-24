@@ -1,0 +1,11 @@
+*video-state.json
+language.txt
+.launcher*
+*.log
+*.engine
+*.engine.cache
+*.pyc
+__pycache__/
+watch_later/
+dist/
+mpv-build/

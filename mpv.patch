@@ -1,0 +1,3059 @@
+diff --git a/DOCS/man/vf.rst b/DOCS/man/vf.rst
+index a1f036a..720cc59 100644
+--- a/DOCS/man/vf.rst
++++ b/DOCS/man/vf.rst
+@@ -771,6 +771,26 @@ Available mpv-only filters are:
+         Enable NVIDIA RTX Video HDR processing. This only converts SDR to HDR,
+         so it is ignored when the source is already HDR.
+ 
++``nvidia-vfg``
++    NVIDIA Video Frame Generation using the Video Effects SDK. It synthesizes
++    intermediate frames between adjacent video frames and supports multipliers
++    from 2 to 8. The default is 2x with the medium model.
++
++    Requires a compatible NVIDIA GPU and the NVIDIA VFX SDK Core plus the Video
++    Frame Generation feature and model. NVIDIA distributes those components
++    separately through NGC; mpv does not include them. If the SDK runtime or
++    feature cannot be loaded, this filter passes video through unchanged.
++
++    The filter converts frames through pinned host memory, which may limit
++    real-time performance at high resolutions. It supports 8-bit SDR and
++    packed 10-bit HDR input; output frames retain the source color metadata.
++
++    ``mode=<low|medium|high>``
++        Select the NVIDIA VFG model (default: medium).
++
++    ``multiplier=<2..8>``
++        Select the output frame-rate multiplier (default: 2).
++
+ ``amf_frc``
+     AMD Frame Rate Conversion filter. Requires AMD hardware and drivers
+     supporting AMF FRC.
+diff --git a/filters/user_filters.c b/filters/user_filters.c
+index ea7b69c..03a3b8c 100644
+--- a/filters/user_filters.c
++++ b/filters/user_filters.c
+@@ -100,6 +100,7 @@ const struct mp_user_filter_entry *vf_list[] = {
+ #endif
+ #if HAVE_D3D_HWACCEL
+     &vf_d3d11vpp,
++    &vf_nvidia_vfg,
+ #endif
+ #if HAVE_AMF
+     &vf_amf_frc,
+diff --git a/filters/user_filters.h b/filters/user_filters.h
+index f2c31ef..eab5a97 100644
+--- a/filters/user_filters.h
++++ b/filters/user_filters.h
+@@ -36,6 +36,7 @@ extern const struct mp_user_filter_entry vf_format;
+ extern const struct mp_user_filter_entry vf_vdpaupp;
+ extern const struct mp_user_filter_entry vf_vavpp;
+ extern const struct mp_user_filter_entry vf_d3d11vpp;
++extern const struct mp_user_filter_entry vf_nvidia_vfg;
+ extern const struct mp_user_filter_entry vf_amf_frc;
+ extern const struct mp_user_filter_entry vf_fingerprint;
+ extern const struct mp_user_filter_entry vf_gpu;
+diff --git a/meson.build b/meson.build
+index 656d156..ec37c46 100644
+--- a/meson.build
++++ b/meson.build
+@@ -1439,7 +1439,9 @@ d3d_hwaccel = get_option('d3d-hwaccel').require(
+ features += {'d3d-hwaccel': d3d_hwaccel.allowed()}
+ if features['d3d-hwaccel']
+     sources += files('video/d3d.c',
+-                     'video/filter/vf_d3d11vpp.c')
++                     'video/filter/vf_d3d11vpp.c',
++                     'video/filter/nvidia_vfg.c',
++                     'video/filter/vf_nvidia_vfg.c')
+ endif
+ 
+ amf = cc.has_header('AMF/core/Factory.h', required:
+diff --git a/player/lua.c b/player/lua.c
+index b137155..38ce945 100644
+--- a/player/lua.c
++++ b/player/lua.c
+@@ -39,6 +39,7 @@
+ #include "options/path.h"
+ #include "misc/bstr.h"
+ #include "misc/codepoint_width.h"
++#include "misc/io_utils.h"
+ #include "misc/json.h"
+ #include "osdep/subprocess.h"
+ #include "osdep/timer.h"
+@@ -1172,6 +1173,34 @@ static int script_join_path(lua_State *L)
+     return 1;
+ }
+ 
++// Read a local file in full or fail when it exceeds the caller's limit.
++static int script_read_local_file(lua_State *L)
++{
++    const char *path = luaL_checkstring(L, 1);
++    lua_Integer limit = luaL_checkinteger(L, 2);
++    luaL_argcheck(L, limit > 0 && limit < INT_MAX, 2, "invalid file size limit");
++    struct script_ctx *ctx = get_ctx(L);
++    int flags = STREAM_READ_FILE_FLAGS_DEFAULT | STREAM_SILENT;
++    bstr data = stream_read_file2(path, NULL, flags, ctx->mpctx->global, limit);
++    if (!data.start) {
++        lua_pushnil(L);
++        return 1;
++    }
++    lua_pushlstring(L, data.start, data.len);
++    talloc_free(data.start);
++    return 1;
++}
++
++// Replace a local file with the payload using mpv's native path handling.
++static int script_atomic_write_file(lua_State *L)
++{
++    const char *path = luaL_checkstring(L, 1);
++    size_t size;
++    const char *payload = luaL_checklstring(L, 2, &size);
++    lua_pushboolean(L, mp_save_to_file(path, payload, size));
++    return 1;
++}
++
+ static int script_parse_json(lua_State *L)
+ {
+     mp_lua_optarg(L, 2);
+@@ -1282,6 +1311,8 @@ static const struct fn_entry utils_fns[] = {
+     FN_ENTRY(file_info),
+     FN_ENTRY(split_path),
+     FN_ENTRY(join_path),
++    FN_ENTRY(read_local_file),
++    FN_ENTRY(atomic_write_file),
+     FN_ENTRY(parse_json),
+     FN_ENTRY(format_json),
+     FN_ENTRY(get_env_list),
+diff --git a/player/lua/osc.lua b/player/lua/osc.lua
+index 64fd599..a5bcd78 100644
+--- a/player/lua/osc.lua
++++ b/player/lua/osc.lua
+@@ -60,8 +60,10 @@ local user_opts = {
+     floatingwidth = 700,          -- width of the floating layout
+     floatingalpha = 105,          -- alpha of the floating layout background
+     tracknumberswidth = 35,       -- width for track number labels (0 = icon only)
++    custom_button_spacing = 9,    -- horizontal gap between custom buttons
++    custom_button_group_spacing = 0, -- extra gap before a group on a bar
+     greenandgrumpy = false,     -- disable santa hat
+-    chapter_fmt = "Chapter: %s", -- chapter print format for seekbar-hover. "no" to disable
++    chapter_fmt = "Глава: %s", -- chapter print format for seekbar-hover. "no" to disable
+     unicodeminus = false,       -- whether to use the Unicode minus sign character
+     icon_style = "layout",      -- icon style: layout/classic/fluent
+ 
+@@ -161,6 +163,8 @@ local user_opts = {
+ 
+ for i = 1, 99 do
+     user_opts["custom_button_" .. i .. "_content"] = ""
++    user_opts["custom_button_" .. i .. "_width"] = 0
++    user_opts["custom_button_" .. i .. "_group_start"] = false
+     user_opts["custom_button_" .. i .. "_mbtn_left_command"] = ""
+     user_opts["custom_button_" .. i .. "_mbtn_mid_command"] = ""
+     user_opts["custom_button_" .. i .. "_mbtn_right_command"] = ""
+@@ -633,7 +637,8 @@ local function get_touchtimeout()
+ end
+ 
+ local function cache_enabled()
+-    return state.demuxer_cache_state and #state.demuxer_cache_state["seekable-ranges"] > 0
++    local ranges = state.demuxer_cache_state and state.demuxer_cache_state["seekable-ranges"]
++    return ranges ~= nil and #ranges > 0
+ end
+ 
+ local function reset_margins()
+@@ -791,6 +796,7 @@ end
+ --
+ 
+ local elements = {}
++local custom_button_content = {}
+ 
+ local function update_slider(element)
+     local elem_geo = element.layout.geometry
+@@ -1554,7 +1560,7 @@ local function window_controls(topbar)
+     ne.content = function ()
+         local title = mp.command_native({"expand-text", mp.get_property("title")})
+         title = title:gsub("\n", " ")
+-        return title ~= "" and mp.command_native({"escape-ass", title}) or "mpv"
++        return title ~= "" and mp.command_native({"escape-ass", title}) or "Проигрыватель RTX Video"
+     end
+     local left_pad = 5
+     local right_pad = 10
+@@ -1861,6 +1867,18 @@ layouts["slimbox"] = function ()
+     lo.alpha[3] = user_opts.boxalpha
+ end
+ 
++local function custom_button_width(index, fallback)
++    local width = user_opts["custom_button_" .. index .. "_width"]
++    return width > 0 and width or fallback
++end
++
++local function custom_button_group_gap(index)
++    if index > 1 and user_opts["custom_button_" .. index .. "_group_start"] then
++        return math.max(0, user_opts.custom_button_group_spacing)
++    end
++    return 0
++end
++
+ local function bar_layout(direction, slim)
+     local osc_geo = {
+         x = -2,
+@@ -1872,15 +1890,16 @@ local function bar_layout(direction, slim)
+ 
+     local padX = 9
+     local buttonW = 27
++    local top_button_w = 18
++    local cache_w = cache_enabled() and 150 or 0
++    local adjacent_w = slim and buttonW or cache_w
++    local custom_spacing = math.max(0, user_opts.custom_button_spacing)
+     local tcW = (state.tc_ms) and 170 or 110
+     if user_opts.tcspace >= 50 and user_opts.tcspace <= 200 then
+         -- adjust our hardcoded font size estimation
+         tcW = tcW * user_opts.tcspace / 100
+     end
+ 
+-    local tsW = 90
+-    local minW = (buttonW + padX)*5 + (tcW + padX)*4 + (tsW + padX)*2
+-
+     -- Special topbar handling when window controls are present
+     local padwc_l
+     local padwc_r
+@@ -1895,6 +1914,15 @@ local function bar_layout(direction, slim)
+         padwc_r = window_control_box_width
+     end
+ 
++    local tsW = 90
++    local minW = (buttonW + padX)*5 + (tcW + padX)*4 + (tsW + padX)*2
++    local top_row_w = 3 * (top_button_w + padX) + 2 * padX + 96 + adjacent_w
++    for i = 1, last_custom_button do
++        top_row_w = top_row_w + custom_button_width(i, buttonW) +
++                    custom_spacing + custom_button_group_gap(i)
++    end
++    minW = math.max(minW, top_row_w + custom_spacing) + padwc_l + padwc_r
++
+     if osc_param.display_aspect > 0 and osc_param.playresx < minW then
+         osc_param.playresy = minW / osc_param.display_aspect
+         osc_param.playresx = osc_param.playresy * osc_param.display_aspect
+@@ -1957,11 +1985,12 @@ local function bar_layout(direction, slim)
+ 
+ 
+     -- Menu
+-    geo = { x = osc_geo.x + padX + 4, y = line1, an = 4, w = 18, h = 26 }
++    geo = { x = osc_geo.x + padX + 4 + padwc_l, y = line1, an = 4,
++            w = top_button_w, h = 26 }
+     lo = add_layout("menu")
+     lo.geometry = geo
+     lo.style = osc_styles.topButtonsBar
+-    lo.hitbox = { x1 = 0 }
++    lo.hitbox = { x1 = edge_x1 }
+ 
+     -- Playlist prev/next
+     geo = { x = geo.x + geo.w + padX, y = geo.y, an = geo.an, w = geo.w, h = geo.h }
+@@ -1977,21 +2006,36 @@ local function bar_layout(direction, slim)
+     local t_l = geo.x + geo.w + padX
+ 
+     -- Custom buttons
+-    local t_r = osc_geo.x + osc_geo.w
++    local t_r = osc_geo.x + osc_geo.w - padwc_r
+ 
+     for i = last_custom_button, 1, -1 do
+-        t_r = t_r - padX
+-        geo = { x = t_r, y = geo.y, an = 6, w = geo.w, h = geo.h }
+-        t_r = t_r - geo.w
++        local width = custom_button_width(i, buttonW)
++        t_r = t_r - custom_spacing
++        geo = { x = t_r - width / 2, y = line1, an = 5, w = width, h = geo.h }
++        t_r = t_r - width
+         lo = add_layout("custom_button_" .. i)
+         lo.geometry = geo
+         lo.style = osc_styles.vidtitleBar
+         if i == last_custom_button then
+-            lo.hitbox = { x2 = math.huge }
++            lo.hitbox = { x2 = edge_x2 }
++        end
++
++        local group_gap = custom_button_group_gap(i)
++        if group_gap > 0 then
++            local divider = "custom_button_divider_" .. i
++            new_element(divider, "box")
++            lo = add_layout(divider)
++            lo.geometry = {
++                x = t_r - (custom_spacing + group_gap) / 2,
++                y = line1, an = 5, w = 1.5, h = 14,
++            }
++            lo.style = osc_styles.vidtitleBar
++            lo.alpha[1] = 115
++            t_r = t_r - group_gap
+         end
+     end
+ 
+-    t_r = t_r - padX
++    t_r = t_r - custom_spacing
+ 
+     if slim then
+         -- Fullscreen button
+@@ -1999,16 +2043,18 @@ local function bar_layout(direction, slim)
+         lo = add_layout("fullscreen")
+         lo.geometry = geo
+         lo.style = osc_styles.topButtonsBar
+-        lo.hitbox = { x2 = edge_x2 }
+-    else
++        if last_custom_button == 0 then
++            lo.hitbox = { x2 = edge_x2 }
++        end
++    elseif cache_w > 0 then
+         -- Cache
+-        geo = { x = t_r, y = geo.y, an = 6, w = 150, h = geo.h }
++        geo = { x = t_r, y = geo.y, an = 6, w = cache_w, h = geo.h }
+         lo = add_layout("cache")
+         lo.geometry = geo
+         lo.style = osc_styles.vidtitleBar
+     end
+ 
+-    t_r = t_r - geo.w - padX
++    t_r = t_r - adjacent_w - padX
+ 
+     -- Title
+     geo = { x = t_l, y = geo.y, an = 4,
+@@ -2017,7 +2063,7 @@ local function bar_layout(direction, slim)
+     lo.geometry = geo
+     lo.style = string.format("%s{\\clip(%f,%f,%f,%f)}",
+         osc_styles.vidtitleBar,
+-        geo.x, geo.y-geo.h, geo.w, geo.y+geo.h)
++        geo.x, geo.y-geo.h, t_r, geo.y+geo.h)
+ 
+     if slim then
+         return
+@@ -2398,7 +2444,7 @@ local function osc_init()
+         local title = state.forced_title or
+                       mp.command_native({"expand-text", user_opts.title})
+         title = title:gsub("\n", " ")
+-        return title ~= "" and mp.command_native({"escape-ass", title}) or "mpv"
++        return title ~= "" and mp.command_native({"escape-ass", title}) or "Проигрыватель RTX Video"
+     end
+     bind_mouse_buttons("title")
+ 
+@@ -2666,7 +2712,7 @@ local function osc_init()
+         end
+         local min = math.floor(dmx_cache / 60)
+         local sec = math.floor(dmx_cache % 60) -- don't round e.g. 59.9 to 60
+-        return "Cache: " .. (min > 0 and
++        return "Буфер: " .. (min > 0 and
+             string.format("%sm%02.0fs", min, sec) or
+             string.format("%3.0fs", sec))
+     end
+@@ -2691,7 +2737,9 @@ local function osc_init()
+             break
+         end
+         ne = new_element("custom_button_" .. i, "button")
+-        ne.content = content
++        ne.content = function()
++            return custom_button_content[i] or content
++        end
+         bind_mouse_buttons("custom_button_" .. i)
+         last_custom_button = i
+     end
+@@ -3124,7 +3172,7 @@ local function render_logo()
+         ass:new_event()
+         ass:pos(display_w / 2, icon_y + 65)
+         ass:an(8)
+-        ass:append("Drop files or URLs to play here.")
++        ass:append("Перетащите сюда файл или ссылку")
+     end
+     set_osd(state.logo_osd, display_w, display_h, ass.text, -1000)
+ end
+@@ -3266,6 +3314,15 @@ mp.register_script_message("osc-tracklist", function(dur)
+     mp.command("show-text ${track-list} " .. (dur and dur * 1000 or ""))
+ end)
+ 
++mp.register_script_message("osc-custom-button", function(index, content)
++    index = tonumber(index)
++    if not index or index < 1 or index > 99 or index % 1 ~= 0 then
++        return
++    end
++    custom_button_content[index] = content and mp.command_native({"escape-ass", content})
++    request_tick()
++end)
++
+ observe_cached("fullscreen", function ()
+     state.marginsREQ = true
+     request_init_resize()
+@@ -3290,7 +3347,16 @@ mp.observe_property("display-fps", "number", set_tick_delay)
+ observe_cached("pause", request_tick)
+ observe_cached("volume", request_tick)
+ observe_cached("mute", request_tick)
+-observe_cached("demuxer-cache-state", request_tick)
++mp.observe_property("demuxer-cache-state", "native", function (_, value)
++    local had_cache = cache_enabled()
++    state.demuxer_cache_state = value
++    if had_cache ~= cache_enabled() and
++        (user_opts.layout == "bottombar" or user_opts.layout == "topbar") then
++        request_init()
++    else
++        request_tick()
++    end
++end)
+ mp.observe_property("vo-configured", "bool", request_tick)
+ mp.observe_property("playback-time", "number", request_tick)
+ observe_cached("osd-dimensions", request_init_resize)
+@@ -3378,7 +3444,8 @@ local function visibility_mode(mode, no_osd)
+     mp.set_property_native("user-data/osc/visibility", mode)
+ 
+     if not no_osd and tonumber(mp.get_property("osd-level")) >= 1 then
+-        mp.osd_message("OSC visibility: " .. mode)
++        local labels = {auto = "автоматически", always = "всегда", never = "скрыта"}
++        mp.osd_message("Панель управления: " .. labels[mode])
+     end
+ 
+     -- Reset the input state on a mode change. The input state will be
+@@ -3411,7 +3478,7 @@ local function idlescreen_visibility(mode, no_osd)
+     mp.set_property_native("user-data/osc/idlescreen", user_opts.idlescreen)
+ 
+     if not no_osd and tonumber(mp.get_property("osd-level")) >= 1 then
+-        mp.osd_message("OSC logo visibility: " .. tostring(mode))
++        mp.osd_message("Заставка: " .. (user_opts.idlescreen and "вкл." or "выкл."))
+     end
+ 
+     request_tick()
+diff --git a/player/lua/select.lua b/player/lua/select.lua
+index 78e3b5d..e83a9af 100644
+--- a/player/lua/select.lua
++++ b/player/lua/select.lua
+@@ -88,12 +88,12 @@ mp.add_key_binding(nil, "select-playlist", function (t)
+         end
+ 
+         if #playlist == 0 then
+-            show_warning("The playlist is empty.")
++            show_warning("Список воспроизведения пуст.")
+             return
+         end
+ 
+         input.select({
+-            prompt = "Select a playlist entry:",
++            prompt = "Выберите файл из списка:",
+             items = playlist,
+             default_item = default_item,
+             keep_open = keep_open,
+@@ -108,22 +108,30 @@ mp.add_key_binding(nil, "select-playlist", function (t)
+     open()
+ end, { complex = true })
+ 
++local track_type_names = {audio = "Аудио", video = "Видео", sub = "Субтитры"}
++
+ local function format_track_type(track)
+-    return (track.image
+-                and "Image"
+-                or track.type:sub(1, 1):upper() .. track.type:sub(2)) ..
+-           ": "
++    return (track.image and "Изображение" or track_type_names[track.type] or track.type) .. ": "
+ end
+ 
++local track_flags = {
++    {"default", "по умолчанию"},
++    {"forced", "принудительная"},
++    {"dependent", "зависимая"},
++    {"visual-impaired", "тифлокомментарий"},
++    {"hearing-impaired", "для слабослышащих"},
++    {"original", "оригинал"},
++    {"commentary", "комментарии"},
++    {"image", "изображение"},
++    {"external", "внешняя"},
++}
++
+ local function format_flags(track)
+     local flags = ""
+ 
+-    for _, flag in ipairs({
+-        "default", "forced", "dependent", "visual-impaired", "hearing-impaired",
+-        "original", "commentary", "image", "external"
+-    }) do
+-        if track[flag] then
+-            flags = flags .. flag .. " "
++    for _, flag in ipairs(track_flags) do
++        if track[flag[1]] then
++            flags = flags .. flag[2] .. ", "
+         end
+     end
+ 
+@@ -131,7 +139,7 @@ local function format_flags(track)
+         return ""
+     end
+ 
+-    return " [" .. flags:sub(1, -2) .. "]"
++    return " [" .. flags:sub(1, -3) .. "]"
+ end
+ 
+ local function format_track(track)
+@@ -146,15 +154,15 @@ local function format_track(track)
+              .. " " or "") ..
+             (track["demux-fps"] and not track.image
+              and string.format("%.4f", track["demux-fps"]):gsub("%.?0*$", "") ..
+-             " fps " or "") ..
++             " кадр/с " or "") ..
+             (track["demux-channel-count"] and track["demux-channel-count"] ..
+-             "ch " or "") ..
++             " кан. " or "") ..
+             (track["codec-profile"] and track.type == "audio"
+              and track["codec-profile"] .. " " or "") ..
+             (track["demux-samplerate"] and track["demux-samplerate"] / 1000 ..
+-             " kHz " or "") ..
++             " кГц " or "") ..
+             (bitrate and string.format("%.0f", bitrate / 1000) ..
+-             " kbps " or "")
++             " кбит/с " or "")
+         ):sub(1, -2) .. ")" .. format_flags(track)
+ end
+ 
+@@ -169,12 +177,12 @@ mp.add_key_binding(nil, "select-track", function (t)
+         end
+ 
+         if #tracks == 0 then
+-            show_warning("No available tracks.")
++            show_warning("Дорожки не найдены.")
+             return
+         end
+ 
+         input.select({
+-            prompt = "Select a track:",
++            prompt = "Выберите дорожку:",
+             items = tracks,
+             default_item = default_item,
+             keep_open = keep_open,
+@@ -232,26 +240,26 @@ end
+ 
+ mp.add_key_binding(nil, "select-sid", function (t)
+     if t.event == "up" or t.event == "repeat" then return end
+-    select_track("sid", "sub", "Select a subtitle:", "No available subtitles.",
++    select_track("sid", "sub", "Выберите дорожку субтитров:", "Субтитры не найдены.",
+                  t.arg == "keep-open")
+ end, { complex = true })
+ 
+ mp.add_key_binding(nil, "select-secondary-sid", function (t)
+     if t.event == "up" or t.event == "repeat" then return end
+-    select_track("secondary-sid", "sub", "Select a secondary subtitle:",
+-                 "No available subtitles.", t.arg == "keep-open")
++    select_track("secondary-sid", "sub", "Выберите дополнительные субтитры:",
++                 "Субтитры не найдены.", t.arg == "keep-open")
+ end, { complex = true })
+ 
+ mp.add_key_binding(nil, "select-aid", function (t)
+     if t.event == "up" or t.event == "repeat" then return end
+-    select_track("aid", "audio", "Select an audio track:",
+-                 "No available audio tracks.", t.arg == "keep-open")
++    select_track("aid", "audio", "Выберите звуковую дорожку:",
++                 "Звуковые дорожки не найдены.", t.arg == "keep-open")
+ end, { complex = true })
+ 
+ mp.add_key_binding(nil, "select-vid", function (t)
+     if t.event == "up" or t.event == "repeat" then return end
+-    select_track("vid", "video", "Select a video track:",
+-                 "No available video tracks.", t.arg == "keep-open")
++    select_track("vid", "video", "Выберите видеодорожку:",
++                 "Видеодорожки не найдены.", t.arg == "keep-open")
+ end, { complex = true })
+ 
+ local function format_time(t, duration)
+@@ -267,7 +275,7 @@ mp.add_key_binding(nil, "select-chapter", function (t)
+         local current_chapter = mp.get_property_native("chapter")
+ 
+         if current_chapter == nil then
+-            show_warning("No available chapters.")
++            show_warning("Главы не найдены.")
+             return
+         end
+ 
+@@ -278,7 +286,7 @@ mp.add_key_binding(nil, "select-chapter", function (t)
+         end
+ 
+         input.select({
+-            prompt = "Select a chapter:",
++            prompt = "Выберите главу:",
+             items = chapters,
+             default_item = default_item or (current_chapter > -1 and current_chapter + 1),
+             keep_open = keep_open,
+@@ -294,7 +302,7 @@ mp.add_key_binding(nil, "select-chapter", function (t)
+ end, { complex = true })
+ 
+ local function format_edition(edition)
+-    return edition.title or ("Edition " .. edition.id + 1)
++    return edition.title or ("Версия " .. edition.id + 1)
+ end
+ 
+ mp.add_key_binding(nil, "select-edition", function (t)
+@@ -304,7 +312,7 @@ mp.add_key_binding(nil, "select-edition", function (t)
+         local edition_list = mp.get_property_native("edition-list")
+ 
+         if edition_list == nil or #edition_list < 2 then
+-            show_warning("No available editions.")
++            show_warning("Других версий нет.")
+             return
+         end
+ 
+@@ -316,7 +324,7 @@ mp.add_key_binding(nil, "select-edition", function (t)
+         end
+ 
+         input.select({
+-            prompt = "Select an edition:",
++            prompt = "Выберите версию:",
+             items = editions,
+             default_item = default_item or (current_edition > -1 and current_edition + 1),
+             keep_open = keep_open,
+@@ -336,7 +344,7 @@ local function select_subtitle_line(secondary, keep_open)
+         local lines = mp.get_property_native(secondary .. "sub-lines")
+ 
+         if not lines then
+-            show_warning("Subtitle lines could not be retrieved.")
++            show_warning("Не удалось прочитать строки субтитров.")
+             return
+         end
+ 
+@@ -364,7 +372,7 @@ local function select_subtitle_line(secondary, keep_open)
+         end
+ 
+         input.select({
+-            prompt = "Select a line to seek to:",
++            prompt = "Выберите строку для перехода:",
+             items = items,
+             default_item = default_item,
+             keep_open = keep_open,
+@@ -410,7 +418,7 @@ mp.add_key_binding(nil, "select-audio-device", function (t)
+         local selected_device = mp.get_property("audio-device")
+ 
+         if #devices == 0 then
+-            show_warning("No available audio devices.")
++            show_warning("Устройства вывода звука не найдены.")
+             return
+         end
+ 
+@@ -423,7 +431,7 @@ mp.add_key_binding(nil, "select-audio-device", function (t)
+         end
+ 
+         input.select({
+-            prompt = "Select an audio device:",
++            prompt = "Выберите устройство вывода звука:",
+             items = items,
+             default_item = default_item,
+             keep_open = keep_open,
+@@ -471,7 +479,7 @@ mp.add_key_binding(nil, "select-watch-history", function (t)
+         if not history_file then
+             show_warning(mp.get_property_native("save-watch-history")
+                          and error_message
+-                         or "Enable --save-watch-history to jump to recently played files.")
++                         or "Включите --save-watch-history, чтобы открыть недавние файлы.")
+             return
+         end
+ 
+@@ -501,10 +509,10 @@ mp.add_key_binding(nil, "select-watch-history", function (t)
+             end
+         end
+ 
+-        items[#items+1] = "Clear history"
++        items[#items+1] = "Очистить историю"
+ 
+         input.select({
+-            prompt = "Select a file:",
++            prompt = "Выберите файл:",
+             items = items,
+             keep_open = keep_open,
+             submit = function (i)
+@@ -514,15 +522,15 @@ mp.add_key_binding(nil, "select-watch-history", function (t)
+                 end
+ 
+                 input.select({
+-                    prompt = "Are you sure you want to clear the history?",
+-                    items = {"No", "Yes"},
++                    prompt = "Очистить историю просмотра?",
++                    items = {"Нет", "Да"},
+                     submit = function (j)
+                         if j == 2 then
+                             error_message = select(2, os.remove(history_file_path))
+                             if error_message then
+                                 show_error(error_message)
+                             else
+-                                mp.osd_message("History cleared.")
++                                mp.osd_message("История очищена.")
+                             end
+                         else
+                             open_history()
+@@ -542,7 +550,7 @@ mp.add_key_binding(nil, "select-watch-later", function (t)
+     local watch_later_dir = mp.get_property("current-watch-later-dir")
+ 
+     if not watch_later_dir then
+-        show_warning("No watch later files found.")
++        show_warning("Файлы для продолжения просмотра не найдены.")
+         return
+     end
+ 
+@@ -553,7 +561,7 @@ mp.add_key_binding(nil, "select-watch-later", function (t)
+     end
+ 
+     if #watch_later_files == 0 then
+-        show_warning("No watch later files found.")
++        show_warning("Файлы для продолжения просмотра не найдены.")
+         return
+     end
+ 
+@@ -571,8 +579,8 @@ mp.add_key_binding(nil, "select-watch-later", function (t)
+ 
+     if #files == 0 then
+         show_warning(mp.get_property_native("write-filename-in-watch-later-config")
+-            and "No watch later files found."
+-            or "Enable --write-filename-in-watch-later-config to select recent files.")
++            and "Файлы для продолжения просмотра не найдены."
++            or "Включите --write-filename-in-watch-later-config для выбора недавних файлов.")
+         return
+     end
+ 
+@@ -586,7 +594,7 @@ mp.add_key_binding(nil, "select-watch-later", function (t)
+     end
+ 
+     input.select({
+-        prompt = "Select a file:",
++        prompt = "Выберите файл:",
+         items = items,
+         keep_open = keep_open,
+         submit = function (i)
+@@ -627,7 +635,7 @@ mp.add_key_binding(nil, "select-binding", function (t)
+     table.sort(items)
+ 
+     input.select({
+-        prompt = "Select a binding:",
++        prompt = "Выберите сочетание клавиш:",
+         items = items,
+         keep_open = t.arg == "keep-open",
+         submit = function (i)
+@@ -684,7 +692,7 @@ mp.add_key_binding(nil, "show-properties", function (t)
+     table.sort(properties)
+ 
+     input.select({
+-        prompt = "Inspect a property:",
++        prompt = "Выберите свойство:",
+         items = properties,
+         keep_open = t.arg == "keep-open",
+         submit = function (i)
+@@ -715,7 +723,7 @@ end
+ 
+ local function edit_config_file(filename)
+     if not mp.get_property_bool("config") then
+-        show_warning("Editing config files with --no-config is not supported.")
++        show_warning("Параметр --no-config отключает редактирование настроек.")
+         return
+     end
+ 
+@@ -776,28 +784,28 @@ mp.add_key_binding(nil, "menu", function ()
+     end
+ 
+     local menu = {
+-        {"Subtitles", "script-binding select/select-sid", sub_track_count > 0},
+-        {"Secondary subtitles", "script-binding select/select-secondary-sid", sub_track_count > 1},
+-        {"Subtitle lines", "script-binding select/select-subtitle-line", text_sub_selected},
+-        {"Audio tracks", "script-binding select/select-aid", audio_track_count > 1},
+-        {"Video tracks", "script-binding select/select-vid", video_track_count > 1},
+-        {"Playlist", "script-binding select/select-playlist",
++        {"Субтитры", "script-binding select/select-sid", sub_track_count > 0},
++        {"Дополнительные субтитры", "script-binding select/select-secondary-sid", sub_track_count > 1},
++        {"Строки субтитров", "script-binding select/select-subtitle-line", text_sub_selected},
++        {"Звуковые дорожки", "script-binding select/select-aid", audio_track_count > 1},
++        {"Видеодорожки", "script-binding select/select-vid", video_track_count > 1},
++        {"Список воспроизведения", "script-binding select/select-playlist",
+          mp.get_property_native("playlist-count") > 1},
+-        {"Chapters", "script-binding select/select-chapter", mp.get_property("chapter")},
+-        {is_disc and "Titles" or "Editions", "script-binding select/select-edition",
++        {"Главы", "script-binding select/select-chapter", mp.get_property("chapter")},
++        {is_disc and "Разделы диска" or "Версии", "script-binding select/select-edition",
+          mp.get_property_native("edition-list/count", 0) > 1},
+-        {"Audio devices", "script-binding select/select-audio-device", audio_track_count > 0},
+-        {"Key bindings", "script-binding select/select-binding", true},
+-        {"History", "script-binding select/select-watch-history", true},
+-        {"Watch later", "script-binding select/select-watch-later", true},
+-        {"Playback statistics", "script-binding stats/display-page-1-toggle", true},
+-        {"File information", "script-binding stats/display-page-5-toggle",
++        {"Устройства вывода звука", "script-binding select/select-audio-device", audio_track_count > 0},
++        {"Сочетания клавиш", "script-binding select/select-binding", true},
++        {"История просмотра", "script-binding select/select-watch-history", true},
++        {"Продолжить просмотр", "script-binding select/select-watch-later", true},
++        {"Статистика воспроизведения", "script-binding stats/display-page-1-toggle", true},
++        {"Сведения о файле", "script-binding stats/display-page-5-toggle",
+          mp.get_property("filename")},
+-        {"Edit config file", "script-binding select/edit-config-file", true},
+-        {"Edit key bindings", "script-binding select/edit-input-conf", true},
+-        {"Help", "script-binding stats/display-page-4-toggle", true},
+-        {"Online documentation", "script-binding select/open-docs", true},
+-        {"Support", "script-binding select/open-chat", true},
++        {"Изменить настройки", "script-binding select/edit-config-file", true},
++        {"Изменить сочетания клавиш", "script-binding select/edit-input-conf", true},
++        {"Справка", "script-binding stats/display-page-4-toggle", true},
++        {"Документация mpv", "script-binding select/open-docs", true},
++        {"Поддержка mpv", "script-binding select/open-chat", true},
+     }
+ 
+     local labels = {}
+@@ -1035,7 +1043,7 @@ local function clamp_submenu(submenu, max, cmd)
+         clamped[1] = {
+             title = "…",
+             cmd = cmd,
+-            shortcut = first - 1 .. " more",
++            shortcut = "Ещё " .. (first - 1),
+         }
+     end
+ 
+@@ -1047,7 +1055,7 @@ local function clamp_submenu(submenu, max, cmd)
+         clamped[#clamped + 1] = {
+             title = "…",
+             cmd = cmd,
+-            shortcut = #submenu - last .. " more",
++            shortcut = "Ещё " .. (#submenu - last),
+         }
+     end
+ 
+diff --git a/video/filter/vf_d3d11vpp.c b/video/filter/vf_d3d11vpp.c
+index 6706c73..0c22a36 100644
+--- a/video/filter/vf_d3d11vpp.c
++++ b/video/filter/vf_d3d11vpp.c
+@@ -655,10 +655,14 @@ static void vf_d3d11vpp_process(struct mp_filter *vf)
+         p->out_params.w += p->out_params.w % 2 != 0;
+         p->out_params.h = (int)(p->opts->scale * p->params.h);
+         p->out_params.h += p->out_params.h % 2 != 0;
+-        p->out_params.crop.x0 = lrintf(p->opts->scale * p->out_params.crop.x0);
+-        p->out_params.crop.x1 = lrintf(p->opts->scale * p->out_params.crop.x1);
+-        p->out_params.crop.y0 = lrintf(p->opts->scale * p->out_params.crop.y0);
+-        p->out_params.crop.y1 = lrintf(p->opts->scale * p->out_params.crop.y1);
++        // The allocated output dimensions are rounded to even values. Map the
++        // crop into that actual rectangle so a full frame ends at its edge.
++        double scale_x = (double)p->out_params.w / p->params.w;
++        double scale_y = (double)p->out_params.h / p->params.h;
++        p->out_params.crop.x0 = lrint(scale_x * p->params.crop.x0);
++        p->out_params.crop.x1 = lrint(scale_x * p->params.crop.x1);
++        p->out_params.crop.y0 = lrint(scale_y * p->params.crop.y0);
++        p->out_params.crop.y1 = lrint(scale_y * p->params.crop.y1);
+ 
+         if (p->opts->format)
+             p->out_params.hw_subfmt = p->opts->format;
+diff --git a/video/filter/nvidia_vfg.c b/video/filter/nvidia_vfg.c
+new file mode 100644
+index 0000000..cdeb3cc
+--- /dev/null
++++ b/video/filter/nvidia_vfg.c
+@@ -0,0 +1,547 @@
++/*
++ * This file is part of mpv.
++ *
++ * mpv is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ */
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include <windows.h>
++
++#include "nvidia_vfg.h"
++#include "nvvfx/nvVideoEffects.h"
++
++// These formats were added to NvCVImage after the public 0.7.6 headers below.
++// The values are appended to the public enums to preserve the older ABI.
++#define MPV_NVCV_RGB10A2 ((NvCVImage_PixelFormat)13)
++#define MPV_NVCV_P32 ((NvCVImage_ComponentType)11)
++
++#define VFG_EFFECT "VideoFrameGeneration"
++#define VFG_MODE "VideoFrameGeneration.Mode"
++#define VFG_INPUT_WIDTH "InputWidth"
++#define VFG_INPUT_HEIGHT "InputHeight"
++#define VFG_MULTIPLIER "VideoFrameGeneration.FrameMultiplier"
++#define VFG_FRAME_INDEX "VideoFrameGeneration.FrameIndex"
++#define VFG_SHOT_CHANGE "VideoFrameGeneration.ShotChange"
++#define VFG_AUTO_SHOT_CHANGE "VideoFrameGeneration.AutomaticShotChangeDetectionEnabled"
++
++typedef NvCV_Status (*NvVFX_CreateEffect_fn)(NvVFX_EffectSelector, NvVFX_Handle *);
++typedef void (*NvVFX_DestroyEffect_fn)(NvVFX_Handle);
++typedef NvCV_Status (*NvVFX_SetU32_fn)(NvVFX_Handle, NvVFX_ParameterSelector,
++                                       unsigned int);
++typedef NvCV_Status (*NvVFX_SetCudaStream_fn)(NvVFX_Handle,
++                                               NvVFX_ParameterSelector,
++                                               CUstream);
++typedef NvCV_Status (*NvVFX_SetImage_fn)(NvVFX_Handle,
++                                         NvVFX_ParameterSelector, NvCVImage *);
++typedef NvCV_Status (*NvVFX_Run_fn)(NvVFX_Handle, int);
++typedef NvCV_Status (*NvVFX_Load_fn)(NvVFX_Handle);
++typedef NvCV_Status (*NvCVImage_Alloc_fn)(NvCVImage *, unsigned int,
++                                           unsigned int, NvCVImage_PixelFormat,
++                                           NvCVImage_ComponentType, unsigned int,
++                                           unsigned int, unsigned int);
++typedef NvCV_Status (*NvCVImage_Transfer_fn)(const NvCVImage *, NvCVImage *,
++                                              float, CUstream, NvCVImage *);
++typedef void (*NvCVImage_Dealloc_fn)(NvCVImage *);
++
++struct mpv_nvidia_vfg {
++    HMODULE vfx_dll;
++    HMODULE image_dll;
++
++    NvVFX_CreateEffect_fn create_effect;
++    NvVFX_DestroyEffect_fn destroy_effect;
++    NvVFX_SetU32_fn set_u32;
++    NvVFX_SetCudaStream_fn set_cuda_stream;
++    NvVFX_SetImage_fn set_image;
++    NvVFX_Run_fn run;
++    NvVFX_Load_fn load;
++    NvCVImage_Alloc_fn image_alloc;
++    NvCVImage_Transfer_fn image_transfer;
++    NvCVImage_Dealloc_fn image_dealloc;
++
++    NvVFX_Handle effect;
++    NvCVImage previous_host;
++    NvCVImage current_host;
++    NvCVImage inputs[2];
++    unsigned int current_slot;
++    NvCVImage output;
++
++    unsigned int width;
++    unsigned int height;
++    unsigned int multiplier;
++    enum mpv_nvidia_vfg_format format;
++};
++
++static void set_error(char *error, size_t error_size, const char *message)
++{
++    if (error && error_size)
++        snprintf(error, error_size, "%s", message);
++}
++
++static void set_status_error(char *error, size_t error_size,
++                             const char *operation, NvCV_Status status)
++{
++    if (error && error_size)
++        snprintf(error, error_size, "%s failed (NVIDIA VFX status %d)",
++                 operation, (int)status);
++}
++
++static bool append_path(char *dst, size_t dst_size, const char *directory,
++                        const char *filename)
++{
++    size_t length = strlen(directory);
++    const char *separator = length && directory[length - 1] != '\\' &&
++                            directory[length - 1] != '/' ? "\\" : "";
++    int written = snprintf(dst, dst_size, "%s%s%s", directory, separator,
++                           filename);
++    return written >= 0 && (size_t)written < dst_size;
++}
++
++static HMODULE load_library_from_directory(const char *directory,
++                                           const char *filename)
++{
++    char path[MAX_PATH] = {0};
++    if (!append_path(path, sizeof(path), directory, filename))
++        return NULL;
++
++    return LoadLibraryExA(path, NULL,
++                          LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR |
++                          LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
++}
++
++static void add_sdk_root(char roots[][MAX_PATH], int *count,
++                         const char *directory)
++{
++    if (!directory || !directory[0] || *count >= 8)
++        return;
++
++    for (int n = 0; n < *count; n++) {
++        if (_stricmp(roots[n], directory) == 0)
++            return;
++    }
++
++    snprintf(roots[*count], MAX_PATH, "%s", directory);
++    (*count)++;
++}
++
++static void add_process_search_directory(const char *directory)
++{
++    if (!directory || !directory[0])
++        return;
++
++    char path[32768] = {0};
++    DWORD length = GetEnvironmentVariableA("PATH", path, sizeof(path));
++    if (length >= sizeof(path))
++        return;
++
++    size_t directory_length = strlen(directory);
++    const char *current = path;
++    while (*current) {
++        const char *separator = strchr(current, ';');
++        size_t entry_length = separator ? (size_t)(separator - current) :
++                                          strlen(current);
++        if (entry_length == directory_length &&
++            _strnicmp(current, directory, directory_length) == 0)
++            return;
++        if (!separator)
++            break;
++        current = separator + 1;
++    }
++
++    size_t path_length = strlen(path);
++    size_t separator_length = path_length ? 1 : 0;
++    if (path_length + separator_length + directory_length >= sizeof(path))
++        return;
++
++    if (path_length)
++        path[path_length++] = ';';
++    memcpy(path + path_length, directory, directory_length + 1);
++    SetEnvironmentVariableA("PATH", path);
++}
++
++static HMODULE load_sdk_library(const char *filename)
++{
++    char roots[8][MAX_PATH] = {{0}};
++    int root_count = 0;
++    char directory[MAX_PATH] = {0};
++    DWORD length = GetEnvironmentVariableA("NV_VIDEO_EFFECTS_PATH", directory,
++                                          sizeof(directory));
++
++    if (length && length < sizeof(directory) && strcmp(directory, "USE_APP_PATH") == 0) {
++        length = GetModuleFileNameA(NULL, directory, sizeof(directory));
++        if (length && length < sizeof(directory)) {
++            char *slash = strrchr(directory, '\\');
++            char *forward_slash = strrchr(directory, '/');
++            if (forward_slash && (!slash || forward_slash > slash))
++                slash = forward_slash;
++            if (slash) {
++                *slash = '\0';
++                add_sdk_root(roots, &root_count, directory);
++            }
++        }
++    } else if (length && length < sizeof(directory)) {
++        add_sdk_root(roots, &root_count, directory);
++    }
++
++    length = GetEnvironmentVariableA("ProgramFiles", directory,
++                                     sizeof(directory));
++    if (length && length < sizeof(directory)) {
++        char sdk_directory[MAX_PATH];
++        if (append_path(sdk_directory, sizeof(sdk_directory), directory,
++                        "NVIDIA Corporation\\NVIDIA Video Effects"))
++            add_sdk_root(roots, &root_count, sdk_directory);
++    }
++
++    // NVIDIA's installer allows a custom directory. The portable package's
++    // installer uses this standard location on this Windows system, so direct
++    // launches of mpv.exe can discover the separately installed SDK too.
++    add_sdk_root(roots, &root_count, "D:\\NVIDIA\\VideoEffects\\VideoFX");
++    add_sdk_root(roots, &root_count, "D:\\NVIDIA\\VideoEffects");
++
++    length = GetEnvironmentVariableA("LOCALAPPDATA", directory,
++                                     sizeof(directory));
++    if (length && length < sizeof(directory)) {
++        char sdk_directory[MAX_PATH];
++        if (append_path(sdk_directory, sizeof(sdk_directory), directory,
++                        "NVIDIA\\VideoEffects"))
++            add_sdk_root(roots, &root_count, sdk_directory);
++    }
++
++    static const char *const subdirectories[] = {"lib", "bin", NULL};
++    for (int root = 0; root < root_count; root++) {
++        // Let the NVIDIA core find feature binaries and resources relative to
++        // whichever SDK installation actually supplied this DLL.
++        SetEnvironmentVariableA("NV_VIDEO_EFFECTS_PATH", roots[root]);
++        char sdk_bin[MAX_PATH] = {0};
++        if (append_path(sdk_bin, sizeof(sdk_bin), roots[root], "bin"))
++            add_process_search_directory(sdk_bin);
++        char feature_bin[MAX_PATH] = {0};
++        if (append_path(feature_bin, sizeof(feature_bin), roots[root],
++                        "features\\nvvfxvideoframegeneration\\bin"))
++            add_process_search_directory(feature_bin);
++
++        HMODULE module = load_library_from_directory(roots[root], filename);
++        if (module)
++            return module;
++
++        for (int n = 0; subdirectories[n]; n++) {
++            char subdirectory[MAX_PATH] = {0};
++            if (!append_path(subdirectory, sizeof(subdirectory), roots[root],
++                             subdirectories[n]))
++                continue;
++            module = load_library_from_directory(subdirectory, filename);
++            if (module)
++                return module;
++        }
++    }
++
++    return NULL;
++}
++
++static bool load_functions(struct mpv_nvidia_vfg *vfg)
++{
++    vfg->vfx_dll = load_sdk_library("NVVideoEffects.dll");
++    vfg->image_dll = load_sdk_library("NVCVImage.dll");
++    if (!vfg->vfx_dll || !vfg->image_dll)
++        return false;
++
++#define LOAD_VFX(field, module, symbol) do { \
++    FARPROC proc = GetProcAddress(vfg->module, symbol); \
++    if (!proc) return false; \
++    memcpy(&vfg->field, &proc, sizeof(vfg->field)); \
++    } while (0)
++    LOAD_VFX(create_effect, vfx_dll, "NvVFX_CreateEffect");
++    LOAD_VFX(destroy_effect, vfx_dll, "NvVFX_DestroyEffect");
++    LOAD_VFX(set_u32, vfx_dll, "NvVFX_SetU32");
++    LOAD_VFX(set_cuda_stream, vfx_dll, "NvVFX_SetCudaStream");
++    LOAD_VFX(set_image, vfx_dll, "NvVFX_SetImage");
++    LOAD_VFX(run, vfx_dll, "NvVFX_Run");
++    LOAD_VFX(load, vfx_dll, "NvVFX_Load");
++    LOAD_VFX(image_alloc, image_dll, "NvCVImage_Alloc");
++    LOAD_VFX(image_transfer, image_dll, "NvCVImage_Transfer");
++    LOAD_VFX(image_dealloc, image_dll, "NvCVImage_Dealloc");
++#undef LOAD_VFX
++    return true;
++}
++
++static bool set_u32_candidates(struct mpv_nvidia_vfg *vfg,
++                               const char *const *selectors,
++                               unsigned int value,
++                               char *error, size_t error_size)
++{
++    NvCV_Status status = NVCV_ERR_SELECTOR;
++    for (int n = 0; selectors[n]; n++) {
++        status = vfg->set_u32(vfg->effect, selectors[n], value);
++        if (status == NVCV_SUCCESS)
++            return true;
++    }
++    set_status_error(error, error_size, selectors[0], status);
++    return false;
++}
++
++static bool alloc_image(struct mpv_nvidia_vfg *vfg, NvCVImage *image,
++                        unsigned int memory_space,
++                        char *error, size_t error_size)
++{
++    NvCVImage_PixelFormat format = vfg->format == MPV_NVIDIA_VFG_BGRA8 ?
++                                   NVCV_BGRA : MPV_NVCV_RGB10A2;
++    NvCVImage_ComponentType component = vfg->format == MPV_NVIDIA_VFG_BGRA8 ?
++                                        NVCV_U8 : MPV_NVCV_P32;
++    NvCV_Status status = vfg->image_alloc(image, vfg->width, vfg->height,
++                                          format, component, NVCV_CHUNKY,
++                                          memory_space, 32);
++    if (status == NVCV_SUCCESS)
++        return true;
++    set_status_error(error, error_size, "NvCVImage_Alloc", status);
++    return false;
++}
++
++static void copy_pixels(uint8_t *restrict destination,
++                        const uint8_t *restrict source, unsigned int width,
++                        uint32_t keep, uint32_t set)
++{
++    for (unsigned int x = 0; x < width; x++) {
++        uint32_t pixel;
++        memcpy(&pixel, source + x * sizeof(pixel), sizeof(pixel));
++        pixel = (pixel & keep) | set;
++        memcpy(destination + x * sizeof(pixel), &pixel, sizeof(pixel));
++    }
++}
++
++static void copy_to_pinned(struct mpv_nvidia_vfg *vfg, NvCVImage *destination,
++                           const uint8_t *source, int source_stride)
++{
++    // Set opaque alpha while copying either BGRA or mpv's X2BGR10.
++    uint32_t alpha = vfg->format == MPV_NVIDIA_VFG_RGB10A2
++        ? 0xC0000000u : 0xFF000000u;
++    for (ptrdiff_t y = 0; y < vfg->height; y++) {
++        uint8_t *dst = (uint8_t *)destination->pixels + y * destination->pitch;
++        const uint8_t *src = source + y * source_stride;
++        copy_pixels(dst, src, vfg->width, UINT32_MAX, alpha);
++    }
++}
++
++static void copy_from_pinned(struct mpv_nvidia_vfg *vfg, uint8_t *destination,
++                             int destination_stride)
++{
++    // Return opaque BGRA, or strip the alpha bits for mpv's X2BGR10.
++    bool rgb10 = vfg->format == MPV_NVIDIA_VFG_RGB10A2;
++    uint32_t keep = rgb10 ? 0x3FFFFFFFu : UINT32_MAX;
++    uint32_t set = rgb10 ? 0 : 0xFF000000u;
++    for (ptrdiff_t y = 0; y < vfg->height; y++) {
++        uint8_t *dst = destination + y * destination_stride;
++        const uint8_t *src = (const uint8_t *)vfg->output.pixels +
++                             y * vfg->output.pitch;
++        copy_pixels(dst, src, vfg->width, keep, set);
++    }
++}
++
++struct mpv_nvidia_vfg *mpv_nvidia_vfg_create(unsigned int width,
++                                             unsigned int height,
++                                             enum mpv_nvidia_vfg_format format,
++                                             unsigned int mode,
++                                             unsigned int multiplier,
++                                             char *error, size_t error_size)
++{
++    struct mpv_nvidia_vfg *vfg = calloc(1, sizeof(*vfg));
++    if (!vfg) {
++        set_error(error, error_size, "Out of memory creating NVIDIA VFG");
++        return NULL;
++    }
++
++    vfg->width = width;
++    vfg->height = height;
++    vfg->format = format;
++    vfg->multiplier = multiplier;
++    if (!load_functions(vfg)) {
++        set_error(error, error_size,
++                  "NVIDIA VFX SDK runtime was not found; install the SDK Core and VFG feature");
++        goto fail;
++    }
++
++    NvCV_Status status = vfg->create_effect(VFG_EFFECT, &vfg->effect);
++    if (status != NVCV_SUCCESS) {
++        set_status_error(error, error_size, "NvVFX_CreateEffect", status);
++        goto fail;
++    }
++
++    if (!alloc_image(vfg, &vfg->previous_host, NVCV_CPU_PINNED,
++                     error, error_size) ||
++        !alloc_image(vfg, &vfg->current_host, NVCV_CPU_PINNED,
++                     error, error_size) ||
++        !alloc_image(vfg, &vfg->inputs[0], NVCV_CUDA, error, error_size) ||
++        !alloc_image(vfg, &vfg->inputs[1], NVCV_CUDA, error, error_size) ||
++        !alloc_image(vfg, &vfg->output, NVCV_CPU_PINNED,
++                     error, error_size))
++        goto fail;
++
++    status = vfg->set_cuda_stream(vfg->effect, NVVFX_CUDA_STREAM, NULL);
++    if (status != NVCV_SUCCESS) {
++        set_status_error(error, error_size, "NvVFX_SetCudaStream", status);
++        goto fail;
++    }
++
++    // SDK Core 1.3 uses feature-specific selectors. The alternates cover
++    // earlier VFG header spellings while keeping the binary SDK optional.
++    static const char *const width_selectors[] = {
++        VFG_INPUT_WIDTH, "VideoFrameGeneration.InputWidth",
++        "VideoFrameGenerationWidth", "Width", NULL,
++    };
++    static const char *const height_selectors[] = {
++        VFG_INPUT_HEIGHT, "VideoFrameGeneration.InputHeight",
++        "VideoFrameGenerationHeight", "Height", NULL,
++    };
++    static const char *const mode_selectors[] = {
++        "Mode", VFG_MODE, "VideoFrameGenerationMode", NULL,
++    };
++    if (!set_u32_candidates(vfg, width_selectors, width, error, error_size) ||
++        !set_u32_candidates(vfg, height_selectors, height, error, error_size) ||
++        !set_u32_candidates(vfg, mode_selectors, mode, error, error_size)) {
++        if (error && error_size && !error[0])
++            set_error(error, error_size, "Could not configure NVIDIA VFG");
++        goto fail;
++    }
++
++    static const char *const automatic_shot_selectors[] = {
++        VFG_AUTO_SHOT_CHANGE,
++        "VideoFrameGenerationAutomaticShotChangeDetectionEnabled",
++        "AutomaticShotChangeDetectionEnabled", NULL,
++    };
++    if (!set_u32_candidates(vfg, automatic_shot_selectors, 1,
++                            error, error_size))
++        goto fail;
++
++    status = vfg->load(vfg->effect);
++    if (status != NVCV_SUCCESS) {
++        set_status_error(error, error_size, "NvVFX_Load", status);
++        goto fail;
++    }
++
++    status = vfg->set_image(vfg->effect, NVVFX_OUTPUT_IMAGE, &vfg->output);
++    if (status != NVCV_SUCCESS) {
++        set_status_error(error, error_size, "NvVFX_SetImage(output)", status);
++        goto fail;
++    }
++
++    static const char *const multiplier_selectors[] = {
++        VFG_MULTIPLIER, "VideoFrameGenerationFrameMultiplier",
++        "FrameMultiplier", "Multiplier", NULL,
++    };
++    if (!set_u32_candidates(vfg, multiplier_selectors, vfg->multiplier,
++                            error, error_size))
++        goto fail;
++
++    return vfg;
++
++fail:
++    mpv_nvidia_vfg_destroy(&vfg);
++    return NULL;
++}
++
++bool mpv_nvidia_vfg_set_inputs(struct mpv_nvidia_vfg *vfg,
++                               const uint8_t *previous, int previous_stride,
++                               const uint8_t *current, int current_stride,
++                               bool reuse_previous,
++                               char *error, size_t error_size)
++{
++    // Adjacent pairs share an input. Keep it in its CUDA buffer and upload
++    // only the new frame into the other slot.
++    unsigned int previous_slot = reuse_previous ? vfg->current_slot : 0;
++    unsigned int current_slot = 1 - previous_slot;
++    NvCVImage *previous_gpu = &vfg->inputs[previous_slot];
++    NvCVImage *current_gpu = &vfg->inputs[current_slot];
++
++    NvCV_Status status = NVCV_SUCCESS;
++    if (!reuse_previous) {
++        copy_to_pinned(vfg, &vfg->previous_host, previous, previous_stride);
++        status = vfg->image_transfer(&vfg->previous_host, previous_gpu,
++                                     1.0f, NULL, NULL);
++    }
++    if (status == NVCV_SUCCESS) {
++        copy_to_pinned(vfg, &vfg->current_host, current, current_stride);
++        status = vfg->image_transfer(&vfg->current_host, current_gpu,
++                                     1.0f, NULL, NULL);
++    }
++    if (status != NVCV_SUCCESS) {
++        set_status_error(error, error_size, "NvCVImage_Transfer(input)", status);
++        return false;
++    }
++
++    status = vfg->set_image(vfg->effect, NVVFX_INPUT_IMAGE_0, previous_gpu);
++    if (status == NVCV_SUCCESS)
++        status = vfg->set_image(vfg->effect, NVVFX_INPUT_IMAGE_1, current_gpu);
++    if (status != NVCV_SUCCESS) {
++        set_status_error(error, error_size, "NvVFX_SetImage(input)", status);
++        return false;
++    }
++
++    vfg->current_slot = current_slot;
++    return true;
++}
++
++bool mpv_nvidia_vfg_run(struct mpv_nvidia_vfg *vfg, unsigned int frame_index,
++                        uint8_t *output, int output_stride,
++                        char *error, size_t error_size)
++{
++    static const char *const frame_index_selectors[] = {
++        VFG_FRAME_INDEX, "VideoFrameGenerationFrameIndex",
++        "FrameIndex", NULL,
++    };
++    NvCV_Status status = NVCV_ERR_SELECTOR;
++    for (int n = 0; frame_index_selectors[n]; n++) {
++        status = vfg->set_u32(vfg->effect, frame_index_selectors[n],
++                              frame_index);
++        if (status == NVCV_SUCCESS)
++            break;
++    }
++    if (status == NVCV_SUCCESS)
++    {
++        static const char *const shot_change_selectors[] = {
++            VFG_SHOT_CHANGE, "VideoFrameGenerationShotChange",
++            "ShotChange", NULL,
++        };
++        status = NVCV_ERR_SELECTOR;
++        for (int n = 0; shot_change_selectors[n]; n++) {
++            status = vfg->set_u32(vfg->effect, shot_change_selectors[n], 0);
++            if (status == NVCV_SUCCESS)
++                break;
++        }
++    }
++    if (status == NVCV_SUCCESS)
++        status = vfg->run(vfg->effect, 0);
++    if (status != NVCV_SUCCESS) {
++        set_status_error(error, error_size, "NVIDIA Video Frame Generation", status);
++        return false;
++    }
++
++    copy_from_pinned(vfg, output, output_stride);
++    return true;
++}
++
++void mpv_nvidia_vfg_destroy(struct mpv_nvidia_vfg **vfg_ptr)
++{
++    if (!vfg_ptr || !*vfg_ptr)
++        return;
++
++    struct mpv_nvidia_vfg *vfg = *vfg_ptr;
++    if (vfg->effect && vfg->destroy_effect)
++        vfg->destroy_effect(vfg->effect);
++    if (vfg->image_dealloc) {
++        vfg->image_dealloc(&vfg->previous_host);
++        vfg->image_dealloc(&vfg->current_host);
++        vfg->image_dealloc(&vfg->inputs[0]);
++        vfg->image_dealloc(&vfg->inputs[1]);
++        vfg->image_dealloc(&vfg->output);
++    }
++    if (vfg->image_dll)
++        FreeLibrary(vfg->image_dll);
++    if (vfg->vfx_dll)
++        FreeLibrary(vfg->vfx_dll);
++    free(vfg);
++    *vfg_ptr = NULL;
++}
+diff --git a/video/filter/nvidia_vfg.h b/video/filter/nvidia_vfg.h
+new file mode 100644
+index 0000000..2e7ea1e
+--- /dev/null
++++ b/video/filter/nvidia_vfg.h
+@@ -0,0 +1,37 @@
++/*
++ * This file is part of mpv.
++ *
++ * mpv is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ */
++
++#pragma once
++
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdint.h>
++
++struct mpv_nvidia_vfg;
++
++enum mpv_nvidia_vfg_format {
++    MPV_NVIDIA_VFG_BGRA8,
++    MPV_NVIDIA_VFG_RGB10A2,
++};
++
++struct mpv_nvidia_vfg *mpv_nvidia_vfg_create(unsigned int width,
++                                             unsigned int height,
++                                             enum mpv_nvidia_vfg_format format,
++                                             unsigned int mode,
++                                             unsigned int multiplier,
++                                             char *error, size_t error_size);
++bool mpv_nvidia_vfg_set_inputs(struct mpv_nvidia_vfg *vfg,
++                               const uint8_t *previous, int previous_stride,
++                               const uint8_t *current, int current_stride,
++                               bool reuse_previous,
++                               char *error, size_t error_size);
++bool mpv_nvidia_vfg_run(struct mpv_nvidia_vfg *vfg, unsigned int frame_index,
++                        uint8_t *output, int output_stride,
++                        char *error, size_t error_size);
++void mpv_nvidia_vfg_destroy(struct mpv_nvidia_vfg **vfg);
+diff --git a/video/filter/nvvfx/nvCVImage.h b/video/filter/nvvfx/nvCVImage.h
+new file mode 100644
+index 0000000..3906119
+--- /dev/null
++++ b/video/filter/nvvfx/nvCVImage.h
+@@ -0,0 +1,756 @@
++/*###############################################################################
++#
++# Copyright 2020-2021 NVIDIA Corporation
++#
++# Permission is hereby granted, free of charge, to any person obtaining a copy of
++# this software and associated documentation files (the "Software"), to deal in
++# the Software without restriction, including without limitation the rights to
++# use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
++# the Software, and to permit persons to whom the Software is furnished to do so,
++# subject to the following conditions:
++#
++# The above copyright notice and this permission notice shall be included in all
++# copies or substantial portions of the Software.
++#
++# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
++# FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
++# COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
++# IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
++# CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
++#
++###############################################################################*/
++
++#ifndef __NVCVIMAGE_H__
++#define __NVCVIMAGE_H__
++
++#include "nvCVStatus.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif // ___cplusplus
++
++
++#ifndef   RTX_CAMERA_IMAGE    // Compile with -DRTX_CAMERA_IMAGE=0 to get more functionality and bug fixes.
++  #define RTX_CAMERA_IMAGE  0 // Set to 1 for RTXCamera, which needs an old version, that avoids new functionality
++#endif // RTX_CAMERA_IMAGE
++
++
++struct CUstream_st;   // typedef struct CUstream_st *CUstream;
++
++//! The format of pixels in an image.
++typedef enum NvCVImage_PixelFormat {
++  NVCV_FORMAT_UNKNOWN  = 0,    //!< Unknown pixel format.
++  NVCV_Y               = 1,    //!< Luminance (gray).
++  NVCV_A               = 2,    //!< Alpha (opacity)
++  NVCV_YA              = 3,    //!< { Luminance, Alpha }
++  NVCV_RGB             = 4,    //!< { Red, Green, Blue }
++  NVCV_BGR             = 5,    //!< { Red, Green, Blue }
++  NVCV_RGBA            = 6,    //!< { Red, Green, Blue, Alpha }
++  NVCV_BGRA            = 7,    //!< { Red, Green, Blue, Alpha }
++#if RTX_CAMERA_IMAGE
++  NVCV_YUV420          = 8,    //!< Luminance and subsampled Chrominance { Y, Cb, Cr }
++  NVCV_YUV422          = 9,    //!< Luminance and subsampled Chrominance { Y, Cb, Cr }
++#else // !RTX_CAMERA_IMAGE
++  NVCV_ARGB            = 8,    //!< { Red, Green, Blue, Alpha }
++  NVCV_ABGR            = 9,    //!< { Red, Green, Blue, Alpha }
++  NVCV_YUV420          = 10,   //!< Luminance and subsampled Chrominance { Y, Cb, Cr }
++  NVCV_YUV422          = 11,   //!< Luminance and subsampled Chrominance { Y, Cb, Cr }
++#endif // !RTX_CAMERA_IMAGE
++  NVCV_YUV444          = 12,   //!< Luminance and full bandwidth Chrominance { Y, Cb, Cr }
++} NvCVImage_PixelFormat;
++
++
++//! The data type used to represent each component of an image.
++typedef enum NvCVImage_ComponentType {
++  NVCV_TYPE_UNKNOWN  = 0,      //!< Unknown type of component.
++  NVCV_U8            = 1,      //!< Unsigned 8-bit integer.
++  NVCV_U16           = 2,      //!< Unsigned 16-bit integer.
++  NVCV_S16           = 3,      //!< Signed 16-bit integer.
++  NVCV_F16           = 4,      //!< 16-bit floating-point.
++  NVCV_U32           = 5,      //!< Unsigned 32-bit integer.
++  NVCV_S32           = 6,      //!< Signed 32-bit integer.
++  NVCV_F32           = 7,      //!< 32-bit floating-point (float).
++  NVCV_U64           = 8,      //!< Unsigned 64-bit integer.
++  NVCV_S64           = 9,      //!< Signed 64-bit integer.
++  NVCV_F64           = 10,     //!< 64-bit floating-point (double).
++} NvCVImage_ComponentType;
++
++
++//! Value for the planar field or layout argument. Two values are currently accommodated for RGB:
++//! Interleaved or chunky storage locates all components of a pixel adjacent in memory,
++//! e.g. RGBRGBRGB... (denoted [RGB]).
++//! Planar storage locates the same component of all pixels adjacent in memory,
++//! e.g. RRRRR...GGGGG...BBBBB... (denoted [R][G][B])
++//! YUV has many more variants.
++//! 4:2:2 can be chunky, planar or semi-planar, with different orderings.
++//! 4:2:0 can be planar or semi-planar, with different orderings.
++//! Aliases are provided for FOURCCs defined at fourcc.org.
++//! Note: the LSB can be used to distinguish between chunky and planar formats.
++#define NVCV_INTERLEAVED   0   //!< All components of pixel(x,y) are adjacent (same as chunky) (default for non-YUV).
++#define NVCV_CHUNKY        0   //!< All components of pixel(x,y) are adjacent (same as interleaved).
++#define NVCV_PLANAR        1   //!< The same component of all pixels are adjacent.
++#define NVCV_UYVY          2   //!< [UYVY]    Chunky 4:2:2 (default for 4:2:2)
++#define NVCV_VYUY          4   //!< [VYUY]    Chunky 4:2:2
++#define NVCV_YUYV          6   //!< [YUYV]    Chunky 4:2:2
++#define NVCV_YVYU          8   //!< [YVYU]    Chunky 4:2:2
++#define NVCV_CYUV         10   //!< [YUV]     Chunky 4:4:4
++#define NVCV_CYVU         12   //!< [YVU]     Chunky 4:4:4
++#define NVCV_YUV           3   //!< [Y][U][V] Planar 4:2:2 or 4:2:0 or 4:4:4
++#define NVCV_YVU           5   //!< [Y][V][U] Planar 4:2:2 or 4:2:0 or 4:4:4
++#define NVCV_YCUV          7   //!< [Y][UV]   Semi-planar 4:2:2 or 4:2:0 (default for 4:2:0)
++#define NVCV_YCVU          9   //!< [Y][VU]   Semi-planar 4:2:2 or 4:2:0
++
++//! The following are FOURCC aliases for specific layouts. Note that it is still required to specify the format as well
++//! as the layout, e.g. NVCV_YUV420 and NVCV_NV12, even though the NV12 layout is only associated with YUV420 sampling.
++#define NVCV_I420  NVCV_YUV    //!< [Y][U][V] Planar 4:2:0
++#define NVCV_IYUV  NVCV_YUV    //!< [Y][U][V] Planar 4:2:0
++#define NVCV_YV12  NVCV_YVU    //!< [Y][V][U] Planar 4:2:0
++#define NVCV_NV12  NVCV_YCUV   //!< [Y][UV]   Semi-planar 4:2:0 (default for 4:2:0)
++#define NVCV_NV21  NVCV_YCVU   //!< [Y][VU]   Semi-planar 4:2:0
++#define NVCV_YUY2  NVCV_YUYV   //!< [YUYV]    Chunky 4:2:2
++#define NVCV_I444  NVCV_YUV    //!< [Y][U][V] Planar 4:4:4
++#define NVCV_YM24  NVCV_YUV    //!< [Y][U][V] Planar 4:4:4
++#define NVCV_YM42  NVCV_YVU    //!< [Y][V][U] Planar 4:4:4
++#define NVCV_NV24  NVCV_YCUV   //!< [Y][UV]   Semi-planar 4:4:4
++#define NVCV_NV42  NVCV_YCVU   //!< [Y][VU]   Semi-planar 4:4:4
++
++//! The following are ORed together for the colorspace field for YUV.
++//! NVCV_601 and NVCV_709 describe the color axes of YUV.
++//! NVCV_VIDEO_RANGE and NVCV_VIDEO_RANGE describe the range, [16, 235] or [0, 255], respectively.
++//! NVCV_CHROMA_COSITED and NVCV_CHROMA_INTSTITIAL describe the location of the chroma samples.
++#define NVCV_601               0x00   //!< The Rec.601  YUV colorspace, typically used for SD.
++#define NVCV_709               0x01   //!< The Rec.709  YUV colorspace, typically used for HD.
++#define NVCV_2020              0x02   //!< The Rec.2020 YUV colorspace.
++#define NVCV_VIDEO_RANGE       0x00   //!< The video range is [16, 235].
++#define NVCV_FULL_RANGE        0x04   //!< The video range is [ 0, 255].
++#define NVCV_CHROMA_COSITED    0x00   //!< The chroma is sampled at the same location as the luma samples horizontally.
++#define NVCV_CHROMA_INTSTITIAL 0x08   //!< The chroma is sampled between luma samples horizontally.
++#define NVCV_CHROMA_TOPLEFT    0x10   //!< The chroma is sampled at the same location as the luma samples horizontally and vertically.
++#define NVCV_CHROMA_MPEG2      NVCV_CHROMA_COSITED        //!< As is most video.
++#define NVCV_CHROMA_MPEG1      NVCV_CHROMA_INTSTITIAL
++#define NVCV_CHROMA_JPEG       NVCV_CHROMA_INTSTITIAL
++#define NVCV_CHROMA_H261       NVCV_CHROMA_INTSTITIAL
++#define NVCV_CHROMA_INTERSTITIAL  NVCV_CHROMA_INTSTITIAL  //!< Correct spelling
++
++//! This is the value for the gpuMem field or the memSpace argument.
++#define NVCV_CPU          0   //!< The buffer is stored in CPU memory.
++#define NVCV_GPU          1   //!< The buffer is stored in CUDA memory.
++#define NVCV_CUDA         1   //!< The buffer is stored in CUDA memory.
++#define NVCV_CPU_PINNED   2   //!< The buffer is stored in pinned CPU memory.
++#define NVCV_CUDA_ARRAY   3   //!< A CUDA array is used for storage.
++
++//! Image descriptor.
++typedef struct
++#ifdef _MSC_VER
++__declspec(dllexport)
++#endif // _MSC_VER
++NvCVImage {
++  unsigned int              width;                  //!< The number of pixels horizontally in the image.
++  unsigned int              height;                 //!< The number of pixels  vertically  in the image.
++  signed int                pitch;                  //!< The byte stride between pixels vertically.
++  NvCVImage_PixelFormat     pixelFormat;            //!< The format of the pixels in the image.
++  NvCVImage_ComponentType   componentType;          //!< The data type used to represent each component of the image.
++  unsigned char             pixelBytes;             //!< The number of bytes in a chunky pixel.
++  unsigned char             componentBytes;         //!< The number of bytes in each pixel component.
++  unsigned char             numComponents;          //!< The number of components in each pixel.
++  unsigned char             planar;                 //!< NVCV_CHUNKY, NVCV_PLANAR, NVCV_UYVY, ....
++  unsigned char             gpuMem;                 //!< NVCV_CPU, NVCV_CPU_PINNED, NVCV_CUDA, NVCV_GPU
++  unsigned char             colorspace;             //!< An OR of colorspace, range and chroma phase.
++  unsigned char             reserved[2];            //!< For structure padding and future expansion. Set to 0.
++  void                      *pixels;                //!< Pointer to pixel(0,0) in the image.
++  void                      *deletePtr;             //!< Buffer memory to be deleted (can be NULL).
++  void                      (*deleteProc)(void *p); //!< Delete procedure to call rather than free().
++  unsigned long long        bufferBytes;            //!< The maximum amount of memory available through pixels.
++
++
++#ifdef __cplusplus
++
++  //! Default constructor: fill with 0.
++  inline NvCVImage();
++
++  //! Allocation constructor.
++  //! \param[in]  width     the number of pixels horizontally.
++  //! \param[in]  height    the number of pixels vertically.
++  //! \param[in]  format    the format of the pixels.
++  //! \param[in]  type      the type of each pixel component.
++  //! \param[in]  layout    One of { NVCV_CHUNKY, NVCV_PLANAR } or one of the YUV layouts.
++  //! \param[in]  memSpace  One of { NVCV_CPU, NVCV_CPU_PINNED, NVCV_GPU, NVCV_CUDA }
++  //! \param[in]  alignment row byte alignment. Choose 0 or a power of 2.
++  //!                       1: yields no gap whatsoever between scanlines;
++  //!                       0: default alignment: 4 on CPU, and cudaMallocPitch's choice on GPU.
++  //!                       Other common values are 16 or 32 for cache line size.
++  inline NvCVImage(unsigned width, unsigned height, NvCVImage_PixelFormat format, NvCVImage_ComponentType type,
++          unsigned layout = NVCV_CHUNKY, unsigned memSpace = NVCV_CPU, unsigned alignment = 0);
++
++  //! Subimage constructor.
++  //! \param[in]  fullImg   the full image, from which this subImage view is to be created.
++  //! \param[in]  x         the left edge of the subImage, in reference to the full image.
++  //! \param[in]  y         the top edge  of the subImage, in reference to the full image.
++  //! \param[in]  width     the width  of the subImage, in pixels.
++  //! \param[in]  height    the height of the subImage, in pixels.
++  //! \bug        This does not work for planar or semi-planar formats, neither RGB nor YUV.
++  //! \note       This does work for all chunky formats, including UYVY, VYUY, YUYV, YVYU.
++  inline NvCVImage(NvCVImage *fullImg, int x, int y, unsigned width, unsigned height);
++
++  //! Destructor
++  inline ~NvCVImage();
++
++  //! Copy a rectangular subimage. This works for CPU->CPU, CPU->GPU, GPU->GPU, and GPU->CPU.
++  //! \param[in]  src     The source image from which to copy.
++  //! \param[in]  srcX    The left coordinate of the src rectangle.
++  //! \param[in]  srcY    The top  coordinate of the src rectangle.
++  //! \param[in]  dstX    The left coordinate of the dst rectangle.
++  //! \param[in]  dstY    The top  coordinate of the dst rectangle.
++  //! \param[in]  width   The width  of the rectangle to be copied, in pixels.
++  //! \param[in]  height  The height of the rectangle to be copied, in pixels.
++  //! \param[in]  stream  the CUDA stream.
++  //! \note   NvCVImage_Transfer() can handle more cases.
++  //! \return NVCV_SUCCESS         if successful
++  //! \return NVCV_ERR_MISMATCH    if the formats are different
++  //! \return NVCV_ERR_CUDA        if a CUDA error occurred
++  //! \return NVCV_ERR_PIXELFORMAT if the pixel format is not yet accommodated.
++  inline NvCV_Status copyFrom(const NvCVImage *src, int srcX, int srcY, int dstX, int dstY,
++                              unsigned width, unsigned height, struct CUstream_st* stream = 0);
++
++  //! Copy from one image to another. This works for CPU->CPU, CPU->GPU, GPU->GPU, and GPU->CPU.
++  //! \param[in]  src     The source image from which to copy.
++  //! \param[in]  stream  the CUDA stream.
++  //! \note   NvCVImage_Transfer() can handle more cases.
++  //! \return NVCV_SUCCESS         if successful
++  //! \return NVCV_ERR_MISMATCH    if the formats are different
++  //! \return NVCV_ERR_CUDA        if a CUDA error occurred
++  //! \return NVCV_ERR_PIXELFORMAT if the pixel format is not yet accommodated.
++  inline NvCV_Status copyFrom(const NvCVImage *src, struct CUstream_st* stream = 0);
++
++#endif // ___cplusplus
++} NvCVImage;
++
++
++//! Integer rectangle.
++typedef struct NvCVRect2i   {
++  int x;      //!< The left edge of the rectangle.
++  int y;      //!< The top  edge of the rectangle.
++  int width;  //!< The width  of the rectangle.
++  int height; //!< The height of the rectangle.
++} NvCVRect2i;
++
++
++//! Integer point.
++typedef struct NvCVPoint2i {
++  int x;  //!< The horizontal coordinate.
++  int y;  //!< The vertical coordinate
++} NvCVPoint2i;
++
++
++//! Initialize an image. The C++ constructors can initialize this appropriately.
++//! This is called by the C++ constructor, but C code should call this explicitly.
++//! \param[in,out]  im        the image to initialize.
++//! \param[in]      width     the desired width  of the image, in pixels.
++//! \param[in]      height    the desired height of the image, in pixels.
++//! \param[in]      pitch     the byte stride between pixels vertically.
++//! \param[in]      pixels    a pointer to the pixel buffer.
++//! \param[in]      format    the format of the pixels.
++//! \param[in]      type      the type of the components of the pixels.
++//! \param[in]      layout    One of { NVCV_CHUNKY, NVCV_PLANAR } or one of the YUV layouts.
++//! \param[in]      memSpace  Location of the buffer: one of { NVCV_CPU, NVCV_CPU_PINNED, NVCV_GPU, NVCV_CUDA }
++//! \return NVCV_SUCCESS         if successful
++//! \return NVCV_ERR_PIXELFORMAT if the pixel format is not yet accommodated.
++NvCV_Status NvCV_API NvCVImage_Init(NvCVImage *im, unsigned width, unsigned height, int pitch, void *pixels,
++  NvCVImage_PixelFormat format, NvCVImage_ComponentType type, unsigned layout, unsigned memSpace);
++
++
++//! Initialize a view into a subset of an existing image.
++//! No memory is allocated -- the fullImg buffer is used.
++//! \param[in]  subImg  the sub-image view into the existing full image.
++//! \param[in]  fullImg the existing full image.
++//! \param[in]  x       the left edge of the sub-image, as coordinate of the full image.
++//! \param[in]  y       the top  edge of the sub-image, as coordinate of the full image.
++//! \param[in]  width   the desired width  of the subImage, in pixels.
++//! \param[in]  height  the desired height of the subImage, in pixels.
++//! \bug        This does not work in general for planar or semi-planar formats, neither RGB nor YUV.
++//!             However, it does work for all formats with the full image, to make a shallow copy, e.g.
++//!             NvCVImage_InitView(&subImg, &fullImg, 0, 0, fullImage.width, fullImage.height).
++//!             Cropping a planar or semi-planar image can be accomplished with NvCVImage_TransferRect().
++//! \note       This does work for all chunky formats, including UYVY, VYUY, YUYV, YVYU.
++//! \sa         { NvCVImage_TransferRect }
++void NvCV_API NvCVImage_InitView(NvCVImage *subImg, NvCVImage *fullImg, int x, int y, unsigned width, unsigned height);
++
++
++//! Allocate memory for, and initialize an image. This assumes that the image data structure has nothing meaningful in it.
++//! This is called by the C++ constructor, but C code can call this to allocate an image.
++//! \param[in,out]  im        the image to initialize.
++//! \param[in]      width     the desired width  of the image, in pixels.
++//! \param[in]      height    the desired height of the image, in pixels.
++//! \param[in]      format    the format of the pixels.
++//! \param[in]      type      the type of the components of the pixels.
++//! \param[in]      layout    One of { NVCV_CHUNKY, NVCV_PLANAR } or one of the YUV layouts.
++//! \param[in]      memSpace  Location of the buffer: one of { NVCV_CPU, NVCV_CPU_PINNED, NVCV_GPU, NVCV_CUDA }
++//! \param[in]      alignment row byte alignment. Choose 0 or a power of 2.
++//!                           1: yields no gap whatsoever between scanlines;
++//!                           0: default alignment: 4 on CPU, and cudaMallocPitch's choice on GPU.
++//!                           Other common values are 16 or 32 for cache line size.
++//! \return NVCV_SUCCESS         if the operation was successful.
++//! \return NVCV_ERR_PIXELFORMAT if the pixel format is not accommodated.
++//! \return NVCV_ERR_MEMORY      if there is not enough memory to allocate the buffer.
++NvCV_Status NvCV_API NvCVImage_Alloc(NvCVImage *im, unsigned width, unsigned height, NvCVImage_PixelFormat format,
++  NvCVImage_ComponentType type, unsigned layout, unsigned memSpace, unsigned alignment);
++
++
++//! Reallocate memory for, and initialize an image. This assumes that the image is valid.
++//! It will check bufferBytes to see if enough memory is already available, and will reshape rather than realloc if true.
++//! Otherwise, it will free the previous buffer and reallocate a new one.
++//! \param[in,out]  im        the image to initialize.
++//! \param[in]      width     the desired width  of the image, in pixels.
++//! \param[in]      height    the desired height of the image, in pixels.
++//! \param[in]      format    the format of the pixels.
++//! \param[in]      type      the type of the components of the pixels.
++//! \param[in]      layout    One of { NVCV_CHUNKY, NVCV_PLANAR } or one of the YUV layouts.
++//! \param[in]      memSpace  Location of the buffer: one of { NVCV_CPU, NVCV_CPU_PINNED, NVCV_GPU, NVCV_CUDA }
++//! \param[in]      alignment row byte alignment. Choose 0 or a power of 2.
++//!                           1: yields no gap whatsoever between scanlines;
++//!                           0: default alignment: 4 on CPU, and cudaMallocPitch's choice on GPU.
++//!                           Other common values are 16 or 32 for cache line size.
++//! \return NVCV_SUCCESS         if the operation was successful.
++//! \return NVCV_ERR_PIXELFORMAT if the pixel format is not accommodated.
++//! \return NVCV_ERR_MEMORY      if there is not enough memory to allocate the buffer.
++NvCV_Status NvCV_API NvCVImage_Realloc(NvCVImage *im, unsigned width, unsigned height, NvCVImage_PixelFormat format,
++  NvCVImage_ComponentType type, unsigned layout, unsigned memSpace, unsigned alignment);
++
++
++//! Deallocate the image buffer from the image. The image is not deallocated.
++//! param[in,out] im  the image whose buffer is to be deallocated.
++void NvCV_API NvCVImage_Dealloc(NvCVImage *im);
++
++
++//! Deallocate the image buffer from the image asynchronously on the specified stream. The image is not deallocated.
++//! param[in,out] im      the image whose buffer is to be deallocated.
++//! param[int]    stream  the CUDA stream on which the image buffer is to be deallocated..
++void NvCV_API NvCVImage_DeallocAsync(NvCVImage *im, struct CUstream_st *stream);
++
++
++//! Allocate a new image, with storage (C-style constructor).
++//! \param[in]      width     the desired width  of the image, in pixels.
++//! \param[in]      height    the desired height of the image, in pixels.
++//! \param[in]      format    the format of the pixels.
++//! \param[in]      type      the type of the components of the pixels.
++//! \param[in]      layout    One of { NVCV_CHUNKY, NVCV_PLANAR } or one of the YUV layouts.
++//! \param[in]      memSpace  Location of the buffer: one of { NVCV_CPU, NVCV_CPU_PINNED, NVCV_GPU, NVCV_CUDA }
++//! \param[in]      alignment row byte alignment. Choose 0 or a power of 2.
++//!                           1: yields no gap whatsoever between scanlines;
++//!                           0: default alignment: 4 on CPU, and cudaMallocPitch's choice on GPU.
++//!                           Other common values are 16 or 32 for cache line size.
++//! \param[out]         *out will be a pointer to the new image if successful; otherwise NULL.
++//! \return NVCV_SUCCESS         if the operation was successful.
++//! \return NVCV_ERR_PIXELFORMAT if the pixel format is not accommodated.
++//! \return NVCV_ERR_MEMORY      if there is not enough memory to allocate the buffer.
++NvCV_Status NvCV_API NvCVImage_Create(unsigned width, unsigned height, NvCVImage_PixelFormat format,
++  NvCVImage_ComponentType type, unsigned layout, unsigned memSpace, unsigned alignment, NvCVImage **out);
++
++
++//! Deallocate the image allocated with NvCVImage_Create() (C-style destructor).
++void NvCV_API NvCVImage_Destroy(NvCVImage *im);
++
++
++//! Get offsets for the components of a pixel format.
++//! These are not byte offsets, but component offsets.
++//! \param[in]  format  the pixel format to be interrogated.
++//! \param[out] rOff    a place to store the offset for the red       channel (can be NULL).
++//! \param[out] gOff    a place to store the offset for the green     channel (can be NULL).
++//! \param[out] bOff    a place to store the offset for the blue      channel (can be NULL).
++//! \param[out] aOff    a place to store the offset for the alpha     channel (can be NULL).
++//! \param[out] yOff    a place to store the offset for the luminance channel (can be NULL).
++void NvCV_API NvCVImage_ComponentOffsets(NvCVImage_PixelFormat format, int *rOff, int *gOff, int *bOff, int *aOff, int *yOff);
++
++
++//! Transfer one image to another, with a limited set of conversions.
++//!
++//! If any of the images resides on the GPU, it may run asynchronously,
++//! so cudaStreamSynchronize() should be called if it is necessary to run synchronously.
++//! The following table indicates (with X) the currently-implemented conversions:
++//!    +-------------------+-------------+-------------+-------------+-------------+
++//!    |                   |  u8 --> u8  |  u8 --> f32 | f32 --> u8  | f32 --> f32 |
++//!    +-------------------+-------------+-------------+-------------+-------------+
++//!    | Y      --> Y      |      X      |             |      X      |      X      |
++//!    | Y      --> A      |      X      |             |      X      |      X      |
++//!    | Y      --> RGB    |      X      |      X      |      X      |      X      |
++//!    | Y      --> RGBA   |      X      |      X      |      X      |      X      |
++//!    | A      --> Y      |      X      |             |      X      |      X      |
++//!    | A      --> A      |      X      |             |      X      |      X      |
++//!    | A      --> RGB    |      X      |      X      |      X      |      X      |
++//!    | A      --> RGBA   |      X      |             |             |             |
++//!    | RGB    --> Y      |      X      |      X      |             |             |
++//!    | RGB    --> A      |      X      |      X      |             |             |
++//!    | RGB    --> RGB    |      X      |      X      |      X      |      X      |
++//!    | RGB    --> RGBA   |      X      |      X      |      X      |      X      |
++//!    | RGBA   --> Y      |      X      |      X      |             |             |
++//!    | RGBA   --> A      |      X      |             |             |             |
++//!    | RGBA   --> RGB    |      X      |      X      |      X      |      X      |
++//!    | RGBA   --> RGBA   |      X      |      X      |      X      |      X      |
++//!    | RGB    --> YUV420 |      X      |             |      X      |             |
++//!    | RGBA   --> YUV420 |      X      |             |      X      |             |
++//!    | RGB    --> YUV422 |      X      |             |      X      |             |
++//!    | RGBA   --> YUV422 |      X      |             |      X      |             |
++//!    | RGB    --> YUV444 |      X      |             |      X      |             |
++//!    | RGBA   --> YUV444 |      X      |             |      X      |             |
++//!    | YUV420 --> RGB    |      X      |      X      |             |             |
++//!    | YUV420 --> RGBA   |      X      |      X      |             |             |
++//!    | YUV422 --> RGB    |      X      |      X      |             |             |
++//!    | YUV422 --> RGBA   |      X      |      X      |             |             |
++//!    | YUV444 --> RGB    |      X      |      X      |             |             |
++//!    | YUV444 --> RGBA   |      X      |      X      |             |             |
++//!    +-------------------+-------------+-------------+-------------+-------------+
++//! where
++//! * Either source or destination can be CHUNKY or PLANAR.
++//! * Either source or destination can reside on the CPU or the GPU.
++//! * The RGB components are in any order (i.e. RGB or BGR; RGBA or BGRA).
++//! * For RGBA (or BGRA) destinations, most implementations do not change the alpha channel, so it is recommended to
++//!   set it at initialization time with [cuda]memset(im.pixels, -1, im.pitch * im.height) or
++//!   [cuda]memset(im.pixels, -1, im.pitch * im.height * im.numComponents) for chunky and planar images respectively.
++//! * YUV requires that the colorspace field be set manually prior to Transfer, e.g. typical for layout=NVCV_NV12:
++//!   image.colorspace = NVCV_709 | NVCV_VIDEO_RANGE | NVCV_CHROMA_INTSTITIAL;
++//! * There are also RGBf16-->RGBf32 and RGBf32-->RGBf16 transfers.
++//! * Additionally, when the src and dst formats are the same, all formats are accommodated on CPU and GPU,
++//!   and this can be used as a replacement for cudaMemcpy2DAsync() (which it utilizes). This is also true for YUV,
++//!   whose src and dst must share the same format, layout and colorspace.
++//!
++//! When there is some kind of conversion AND the src and dst reside on different processors (CPU, GPU),
++//! it is necessary to have a temporary GPU buffer, which is reshaped as needed to match the characteristics
++//! of the CPU image. The same temporary image can be used in subsequent calls to NvCVImage_Transfer(),
++//! regardless of the shape, format or component type, as it will grow as needed to accommodate
++//! the largest memory requirement. The recommended usage for most cases is to supply an empty image
++//! as the temporary; if it is not needed, no buffer is allocated. NULL can be supplied as the tmp
++//! image, in which case an ephemeral buffer is allocated if needed, with resultant
++//! performance degradation for image sequences.
++//!
++//! \param[in]      src     the source image.
++//! \param[out]     dst     the destination image.
++//! \param[in]      scale   a scale factor that can be applied when one (but not both) of the images
++//!                         is based on floating-point components; this parameter is ignored when all image components
++//!                         are represented with integer data types, or all image components are represented with
++//!                         floating-point data types.
++//! \param[in]      stream  the stream on which to perform the copy. This is ignored if both images reside on the CPU.
++//! \param[in,out]  tmp     a temporary buffer that is sometimes needed when transferring images
++//!                         between the CPU and GPU in either direction (can be empty or NULL).
++//!                         It has the same characteristics as the CPU image, but it resides on the GPU.
++//! \return         NVCV_SUCCESS           if successful,
++//!                 NVCV_ERR_PIXELFORMAT   if one of the pixel formats is not accommodated.
++//!                 NVCV_ERR_CUDA          if a CUDA error has occurred.
++//!                 NVCV_ERR_GENERAL       if an otherwise unspecified error has occurred.
++NvCV_Status NvCV_API NvCVImage_Transfer(
++             const NvCVImage *src, NvCVImage *dst, float scale, struct CUstream_st *stream, NvCVImage *tmp);
++
++
++//! Transfer a rectangular portion of an image.
++//! See NvCVImage_Transfer() for the pixel format combinations that are implemented.
++//! \param[in]  src     the source image.
++//! \param[in]  srcRect the subRect of the src to be transferred (NULL implies the whole image).
++//! \param[out] dst     the destination image.
++//! \param[in]  dstPt   location to which the srcRect is to be copied (NULL implies (0,0)).
++//! \param[in]  scale   scale factor applied to the magnitude during transfer, typically 1, 255 or 1/255.
++//! \param[in]  stream  the CUDA stream.
++//! \param[in]  tmp     a staging image.
++//! \return     NVCV_SUCCESS  if the operation was completed successfully.
++//! \note       The actual transfer region may be smaller, because the rects are clipped against the images.
++NvCV_Status NvCV_API NvCVImage_TransferRect(
++  const NvCVImage *src, const NvCVRect2i *srcRect, NvCVImage *dst, const NvCVPoint2i *dstPt,
++  float scale, struct CUstream_st *stream, NvCVImage *tmp);
++
++
++//! Transfer from a YUV image.
++//! YUVu8 --> RGBu8 and YUVu8 --> RGBf32 are currently available.
++//! \param[in]  y             pointer to pixel(0,0) of the luminance channel.
++//! \param[in]  yPixBytes     the byte stride between y pixels horizontally.
++//! \param[in]  yPitch        the byte stride between y pixels vertically.
++//! \param[in]  u             pointer to pixel(0,0) of the u (Cb) chrominance channel.
++//! \param[in]  v             pointer to pixel(0,0) of the v (Cr) chrominance channel.
++//! \param[in]  uvPixBytes    the byte stride between u or v pixels horizontally.
++//! \param[in]  uvPitch       the byte stride between u or v pixels vertically.
++//! \param[in]  yuvColorSpace the yuv colorspace, specifying range, chromaticities, and chrominance phase.
++//! \param[in]  yuvMemSpace   the memory space where the pixel buffers reside.
++//! \param[out] dst           the destination image.
++//! \param[in]  dstRect       the destination rectangle (NULL implies the whole image).
++//! \param[in]  scale         scale factor applied to the magnitude during transfer, typically 1, 255 or 1/255.
++//! \param[in]  stream        the CUDA stream.
++//! \param[in]  tmp           a staging image.
++//! \return     NVCV_SUCCESS  if the operation was completed successfully.
++//! \note       The actual transfer region may be smaller, because the rects are clipped against the images.
++//! \note       This is supplied for use with YUV buffers that do not have the standard structure
++//!             that are expected for NvCVImage_Transfer() and NvCVImage_TransferRect.
++NvCV_Status NvCV_API NvCVImage_TransferFromYUV(
++  const void *y,                int yPixBytes,  int yPitch,
++  const void *u, const void *v, int uvPixBytes, int uvPitch,
++  NvCVImage_PixelFormat yuvFormat, NvCVImage_ComponentType yuvType,
++  unsigned yuvColorSpace, unsigned yuvMemSpace,
++  NvCVImage *dst, const NvCVRect2i *dstRect, float scale, struct CUstream_st *stream, NvCVImage *tmp);
++
++
++//! Transfer to a YUV image.
++//! RGBu8 --> YUVu8 and RGBf32 --> YUVu8 are currently available.
++//! \param[in]  src           the source image.
++//! \param[in]  srcRect       the destination rectangle (NULL implies the whole image).
++//! \param[out] y             pointer to pixel(0,0) of the luminance channel.
++//! \param[in]  yPixBytes     the byte stride between y pixels horizontally.
++//! \param[in]  yPitch        the byte stride between y pixels vertically.
++//! \param[out] u             pointer to pixel(0,0) of the u (Cb) chrominance channel.
++//! \param[out] v             pointer to pixel(0,0) of the v (Cr) chrominance channel.
++//! \param[in]  uvPixBytes    the byte stride between u or v pixels horizontally.
++//! \param[in]  uvPitch       the byte stride between u or v pixels vertically.
++//! \param[in]  yuvColorSpace the yuv colorspace, specifying range, chromaticities, and chrominance phase.
++//! \param[in]  yuvMemSpace   the memory space where the pixel buffers reside.
++//! \param[in]  scale         scale factor applied to the magnitude during transfer, typically 1, 255 or 1/255.
++//! \param[in]  stream        the CUDA stream.
++//! \param[in]  tmp           a staging image.
++//! \return     NVCV_SUCCESS  if the operation was completed successfully.
++//! \note       The actual transfer region may be smaller, because the rects are clipped against the images.
++//! \note       This is supplied for use with YUV buffers that do not have the standard structure
++//!             that are expected for NvCVImage_Transfer() and NvCVImage_TransferRect.
++NvCV_Status NvCV_API NvCVImage_TransferToYUV(
++  const NvCVImage *src, const NvCVRect2i *srcRect, 
++  const void *y,                int yPixBytes,  int yPitch,
++  const void *u, const void *v, int uvPixBytes, int uvPitch,
++  NvCVImage_PixelFormat yuvFormat, NvCVImage_ComponentType yuvType,
++  unsigned yuvColorSpace, unsigned yuvMemSpace,
++  float scale, struct CUstream_st *stream, NvCVImage *tmp);
++
++
++//! Between rendering by a graphics system and Transfer by CUDA, it is necessary to map the texture resource.
++//! There is a fair amount of overhead, so its use should be minimized.
++//! Every call to NvCVImage_MapResource() should be matched by a subsequent call to NvCVImage_UnmapResource().
++//! \param[in,out]  im      the image to be mapped.
++//! \param[in]      stream  the stream on which the mapping is to be performed.
++//! \return         NVCV_SUCCESS is the operation was completed successfully.
++//! \note           This is an experimental API. If you find it useful, please respond to XXX@YYY.com,
++//!                 otherwise we may drop support.
++/* EXPERIMENTAL */ NvCV_Status NvCV_API NvCVImage_MapResource(NvCVImage *im, struct CUstream_st *stream);
++
++
++//! After transfer by CUDA, the texture resource must be unmapped in order to be used by the graphics system again.
++//! There is a fair amount of overhead, so its use should be minimized.
++//! Every call to NvCVImage_UnmapResource() should correspond to a preceding call to NvCVImage_MapResource().
++//! \param[in,out]  im      the image to be mapped.
++//! \param[in]      stream  the CUDA stream on which the mapping is to be performed.
++//! \return         NVCV_SUCCESS is the operation was completed successfully.
++//! \note           This is an experimental API. If you find it useful, please respond to XXX@YYY.com,
++//!                 otherwise we may drop support.
++/* EXPERIMENTAL */ NvCV_Status NvCV_API NvCVImage_UnmapResource(NvCVImage *im, struct CUstream_st *stream);
++
++
++//! Composite one source image over another using the given matte.
++//! This accommodates all RGB and RGBA formats, with u8 and f32 components.
++//! If the bg has alpha, then the dst alpha is updated for use in subsequent composition.
++//! \param[in]  fg      the foreground source image.
++//! \param[in]  bg      the background source image.
++//! \param[in]  mat     the matte  Yu8   (or Au8)   image, indicating where the src should come through.
++//! \param[out] dst     the destination image. This can be the same as fg or bg.
++//! \param[in]  stream  the CUDA stream on which the composition is to be performed.
++//! \return NVCV_SUCCESS         if the operation was successful.
++//! \return NVCV_ERR_PIXELFORMAT if the pixel format is not accommodated.
++//! \return NVCV_ERR_MISMATCH    if either the fg & bg & dst formats do not match, or if fg & bg & dst & mat are not
++//!                              in the same address space (CPU or GPU).
++#if RTX_CAMERA_IMAGE == 0
++NvCV_Status NvCV_API NvCVImage_Composite(const NvCVImage *fg, const NvCVImage *bg, const NvCVImage *mat, NvCVImage *dst,
++            struct CUstream_st *stream);
++#else // RTX_CAMERA_IMAGE == 1  // No GPU acceleration
++NvCV_Status NvCV_API NvCVImage_Composite(const NvCVImage *fg, const NvCVImage *bg, const NvCVImage *mat, NvCVImage *dst);
++#endif // RTX_CAMERA_IMAGE == 1
++
++
++//! Composite one source image rectangular region over another using the given matte.
++//! This accommodates all RGB and RGBA formats, with u8 and f32 components.
++//! If the bg has alpha, then the dst alpha is updated for use in subsequent composition.
++//! If the background is not opaque, it is recommended that all images be premultiplied by alpha,
++//! and mode 1 composition be used, to yield the most meaningful composite matte.
++//! \param[in]      fg      the foreground source image.
++//! \param[in]      fgOrg   the upper-left corner of the fg image to be composited (NULL implies (0,0)).
++//! \param[in]      bg      the background source image.
++//! \param[in]      bgOrg   the upper-left corner of the bg image to be composited (NULL implies (0,0)).
++//! \param[in]      mat     the matte image, indicating where the src should come through.
++//!                         This determines the size of the rectangle to be composited.
++//!                         If this is multi-channel, the alpha channel is used as the matte.
++//! \param[in]      mode    the composition mode: 0 (straight alpha over) or 1 (premultiplied alpha over).
++//! \param[out]     dst     the destination image. This can be the same as fg or bg.
++//! \param[in]      dstOrg  the upper-left corner of the dst image to be updated (NULL implies (0,0)).
++//! \param[in]      stream  the CUDA stream on which the composition is to be performed.
++//! \note   If a smaller region of a matte is desired, a window can be created using
++//!         NvCVImage_InitView() for chunky pixels, as illustrated below in NvCVImage_CompositeRectA().
++//! \return NVCV_SUCCESS         if the operation was successful.
++//! \return NVCV_ERR_PIXELFORMAT if the pixel format is not accommodated.
++//! \return NVCV_ERR_MISMATCH    if either the fg & bg & dst formats do not match, or if fg & bg & dst & mat are not
++//!                              in the same address space (CPU or GPU).
++NvCV_Status NvCV_API NvCVImage_CompositeRect(
++    const NvCVImage *fg,  const NvCVPoint2i *fgOrg,
++    const NvCVImage *bg,  const NvCVPoint2i *bgOrg,
++    const NvCVImage *mat, unsigned mode,
++    NvCVImage       *dst, const NvCVPoint2i *dstOrg,
++    struct CUstream_st *stream);
++
++
++//! Composite one RGBA or BGRA source image rectangular region over another RGB, BGR, RGBA or BGRA region.
++//! This accommodates all RGB and RGBA formats, with u8 and f32 components.
++//! If the bg has alpha, then the dst alpha is updated for use in subsequent composition.
++//! If the background is not opaque, it is recommended that all images be premultiplied by alpha,
++//! and mode 1 composition be used, to yield the most meaningful composite matte.
++//! \param[in]      fg      the foreground RGBA or BGRA source image.
++//! \param[in]      fgRect  a sub-rectangle of the fg image (NULL implies the whole image).
++//! \param[in]      bg      the background source image.
++//! \param[in]      bgOrg   the upper-left corner of the bg image to be composited (NULL implies (0,0)).
++//! \param[in]      mode    the composition mode: 0 (straight alpha over) or 1 (premultiplied alpha over).
++//! \param[out]     dst     the destination image. This can be the same as fg or bg.
++//! \param[in]      dstOrg  the upper-left corner of the dst image to be updated (NULL implies (0,0)).
++//! \param[in]      stream  the CUDA stream on which the composition is to be performed.
++//! \return NVCV_SUCCESS         if the operation was successful.
++//! \return NVCV_ERR_PIXELFORMAT if the pixel format is not accommodated.
++//! \return NVCV_ERR_MISMATCH    if either the fg & bg & dst formats do not match, or if fg & bg & dst & mat are not
++//!                              in the same address space (CPU or GPU).
++//! \bug  fgRect will only work for chunky images, not planar.
++#ifdef __cplusplus
++inline NvCV_Status NvCVImage_CompositeRectA(
++    const NvCVImage *fg, const NvCVRect2i  *fgRect,
++    const NvCVImage *bg, const NvCVPoint2i *bgOrg,
++    unsigned mode,
++    NvCVImage       *dst, const NvCVPoint2i *dstOrg,
++    struct CUstream_st *stream
++) {
++  if (fgRect) {
++    NvCVImage fgView(const_cast<NvCVImage*>(fg), fgRect->x, fgRect->y, fgRect->width, fgRect->height);
++    return NvCVImage_CompositeRect(&fgView, nullptr, bg, bgOrg, &fgView, mode, dst, dstOrg, stream);
++  }
++  return NvCVImage_CompositeRect(fg, nullptr, bg, bgOrg, fg, mode, dst, dstOrg, stream);
++}
++#endif // __cplusplus
++
++
++//! Composite a source image over a constant color field using the given matte.
++//! \param[in]      src     the source image.
++//! \param[in]      mat     the matte  image, indicating where the src should come through.
++//! \param[in]      bgColor pointer to a location holding the desired flat background color, with the same format
++//!                         and component ordering as the dst. This acts as a 1x1 background pixel buffer,
++//!                         so should reside in the same memory space (CUDA or CPU) as the other buffers.
++//! \param[in,out]  dst     the destination image. May be the same as src.
++//! \return NVCV_SUCCESS         if the operation was successful.
++//! \return NVCV_ERR_PIXELFORMAT if the pixel format is not accommodated.
++//! \return NVCV_ERR_MISMATCH    if fg & mat & dst & bgColor are not in the same address space (CPU or GPU).
++//! \note   The bgColor must remain valid until complete; this is an important consideration especially if
++//!         the buffers are on the GPU and NvCVImage_CompositeOverConstant() runs asynchronously.
++NvCV_Status NvCV_API NvCVImage_CompositeOverConstant(
++#if RTX_CAMERA_IMAGE == 0
++    const NvCVImage *src, const NvCVImage *mat, const void *bgColor, NvCVImage *dst, struct CUstream_st *stream
++#else // RTX_CAMERA_IMAGE == 1
++    const NvCVImage *src, const NvCVImage *mat, const unsigned char bgColor[3], NvCVImage *dst
++#endif // RTX_CAMERA_IMAGE
++);
++
++
++//! Flip the image vertically.
++//! No actual pixels are moved: it is just an accounting procedure.
++//! This is extremely low overhead, but requires appropriate interpretation of the pitch.
++//! Flipping twice yields the original orientation.
++//! \param[in]  src  the source image (NULL implies src == dst).
++//! \param[out] dst  the flipped image (can be the same as the src).
++//! \return     NVCV_SUCCESS         if successful.
++//! \return     NVCV_ERR_PIXELFORMAT for most planar formats.
++//! \bug        This does not work for planar or semi-planar formats, neither RGB nor YUV.
++//! \note       This does work for all chunky formats, including UYVY, VYUY, YUYV, YVYU.
++NvCV_Status NvCV_API NvCVImage_FlipY(const NvCVImage *src, NvCVImage *dst);
++
++
++//! Get the pointers for YUV, based on the format.
++//! \param[in]  im          The image to be deconstructed.
++//! \param[out] y           A place to store the pointer to y(0,0).
++//! \param[out] u           A place to store the pointer to u(0,0).
++//! \param[out] v           A place to store the pointer to v(0,0).
++//! \param[out] yPixBytes   A place to store the byte stride between  luma  samples horizontally.
++//! \param[out] cPixBytes   A place to store the byte stride between chroma samples horizontally.
++//! \param[out] yRowBytes   A place to store the byte stride between  luma  samples vertically.
++//! \param[out] cRowBytes   A place to store the byte stride between chroma samples vertically.
++//! \return     NVCV_SUCCESS           If the information was gathered successfully.
++//!             NVCV_ERR_PIXELFORMAT   Otherwise.
++NvCV_Status NvCV_API NvCVImage_GetYUVPointers(NvCVImage *im,
++  unsigned char **y, unsigned char **u, unsigned char **v,
++  int *yPixBytes, int *cPixBytes, int *yRowBytes, int *cRowBytes);
++
++
++//! Sharpen an image.
++//! The src and dst should be the same type - conversions are not performed.
++//! This function is only implemented for NVCV_CHUNKY NVCV_U8 pixels, of format NVCV_RGB or NVCV_BGR.
++//! \param[in]  sharpness the sharpness strength, calibrated so that 1 and 2 yields Adobe's Sharpen and Sharpen More.
++//! \param[in]  src       the source image to be sharpened.
++//! \param[out] dst       the resultant image (may be the same as the src).
++//! \param[in]  stream    the CUDA stream on which to perform the computations.
++//! \param[in]  tmp       a temporary working image. This can be NULL, but may result in lower performance.
++//!                       It is best if it resides on the same processor (CPU or GPU) as the destination.
++//! @return     NVCV_SUCCESS          if the operation completed successfully.
++//!             NVCV_ERR_MISMATCH     if the source and destination formats are different.
++//!             NVCV_ERR_PIXELFORMAT  if the function has not been implemented for the chosen pixel type.
++
++NvCV_Status NvCV_API NvCVImage_Sharpen(float sharpness, const NvCVImage *src, NvCVImage *dst,
++  struct CUstream_st *stream, NvCVImage *tmp);
++
++
++#ifdef __cplusplus
++} // extern "C"
++
++/********************************************************************************
++ * NvCVImage default constructor
++ ********************************************************************************/
++
++NvCVImage::NvCVImage() {
++  pixels = nullptr;
++  (void)NvCVImage_Alloc(this, 0, 0, NVCV_FORMAT_UNKNOWN, NVCV_TYPE_UNKNOWN, 0, 0, 0);
++}
++
++/********************************************************************************
++ * NvCVImage allocation constructor
++ ********************************************************************************/
++
++NvCVImage::NvCVImage(unsigned width, unsigned height, NvCVImage_PixelFormat format, NvCVImage_ComponentType type,
++                       unsigned layout, unsigned memSpace, unsigned alignment) {
++  pixels = nullptr;
++  (void)NvCVImage_Alloc(this, width, height, format, type, layout, memSpace, alignment);
++}
++
++/********************************************************************************
++ * Subimage constructor
++ ********************************************************************************/
++
++NvCVImage::NvCVImage(NvCVImage *fullImg, int x, int y, unsigned width, unsigned height) {
++  NvCVImage_InitView(this, fullImg, x, y, width, height);
++}
++
++/********************************************************************************
++ * NvCVImage destructor
++ ********************************************************************************/
++
++NvCVImage::~NvCVImage() { NvCVImage_Dealloc(this); }
++
++/********************************************************************************
++ * copy subimage
++ ********************************************************************************/
++
++NvCV_Status NvCVImage::copyFrom(const NvCVImage *src, int srcX, int srcY, int dstX, int dstY, unsigned wd,
++                                  unsigned ht, struct CUstream_st* stream) {
++#if RTX_CAMERA_IMAGE // This only works for chunky images
++  NvCVImage srcView, dstView;
++  NvCVImage_InitView(&srcView, const_cast<NvCVImage *>(src), srcX, srcY, wd, ht);
++  NvCVImage_InitView(&dstView, this, dstX, dstY, wd, ht);
++  return NvCVImage_Transfer(&srcView, &dstView, 1.f, stream, nullptr);
++#else // !RTX_CAMERA_IMAGE bug fix for non-chunky images
++  NvCVRect2i  srcRect = { (int)srcX, (int)srcY, (int)wd, (int)ht };
++  NvCVPoint2i dstPt   = { (int)dstX, (int)dstY };
++  return NvCVImage_TransferRect(src, &srcRect, this, &dstPt, 1.f, stream, nullptr);
++#endif // RTX_CAMERA_IMAGE
++}
++
++/********************************************************************************
++ * copy image
++ ********************************************************************************/
++
++NvCV_Status NvCVImage::copyFrom(const NvCVImage *src, struct CUstream_st* stream) {
++  return NvCVImage_Transfer(src, this, 1.f, stream, nullptr);
++}
++
++
++#endif // ___cplusplus
++
++#endif // __NVCVIMAGE_H__
+diff --git a/video/filter/nvvfx/nvCVStatus.h b/video/filter/nvvfx/nvCVStatus.h
+new file mode 100644
+index 0000000..f560edc
+--- /dev/null
++++ b/video/filter/nvvfx/nvCVStatus.h
+@@ -0,0 +1,121 @@
++/*###############################################################################
++#
++# Copyright 2020 NVIDIA Corporation
++#
++# Permission is hereby granted, free of charge, to any person obtaining a copy of
++# this software and associated documentation files (the "Software"), to deal in
++# the Software without restriction, including without limitation the rights to
++# use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
++# the Software, and to permit persons to whom the Software is furnished to do so,
++# subject to the following conditions:
++#
++# The above copyright notice and this permission notice shall be included in all
++# copies or substantial portions of the Software.
++#
++# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
++# FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
++# COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
++# IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
++# CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
++#
++###############################################################################*/
++
++#ifndef __NVCVSTATUS_H__
++#define __NVCVSTATUS_H__
++
++#ifndef NvCV_API
++  #ifdef _WIN32
++    #ifdef NVCV_API_EXPORT
++      #define NvCV_API __declspec(dllexport) __cdecl
++    #else
++      #define NvCV_API
++    #endif
++  #else //if linux
++    #define NvCV_API   // TODO: Linux code goes here
++  #endif // _WIN32 or linux
++#endif //NvCV_API
++
++
++#ifdef __cplusplus
++extern "C" {
++#endif // ___cplusplus
++
++
++//! Status codes returned from APIs.
++typedef enum NvCV_Status {
++  NVCV_SUCCESS                   = 0,    //!< The procedure returned successfully.
++  NVCV_ERR_GENERAL               = -1,   //!< An otherwise unspecified error has occurred.
++  NVCV_ERR_UNIMPLEMENTED         = -2,   //!< The requested feature is not yet implemented.
++  NVCV_ERR_MEMORY                = -3,   //!< There is not enough memory for the requested operation.
++  NVCV_ERR_EFFECT                = -4,   //!< An invalid effect handle has been supplied.
++  NVCV_ERR_SELECTOR              = -5,   //!< The given parameter selector is not valid in this effect filter.
++  NVCV_ERR_BUFFER                = -6,   //!< An image buffer has not been specified.
++  NVCV_ERR_PARAMETER             = -7,   //!< An invalid parameter value has been supplied for this effect+selector.
++  NVCV_ERR_MISMATCH              = -8,   //!< Some parameters are not appropriately matched.
++  NVCV_ERR_PIXELFORMAT           = -9,   //!< The specified pixel format is not accommodated.
++  NVCV_ERR_MODEL                 = -10,  //!< Error while loading the TRT model.
++  NVCV_ERR_LIBRARY               = -11,  //!< Error loading the dynamic library.
++  NVCV_ERR_INITIALIZATION        = -12,  //!< The effect has not been properly initialized.
++  NVCV_ERR_FILE                  = -13,  //!< The file could not be found.
++  NVCV_ERR_FEATURENOTFOUND       = -14,  //!< The requested feature was not found
++  NVCV_ERR_MISSINGINPUT          = -15,  //!< A required parameter was not set
++  NVCV_ERR_RESOLUTION            = -16,  //!< The specified image resolution is not supported.
++  NVCV_ERR_UNSUPPORTEDGPU        = -17,  //!< The GPU is not supported
++  NVCV_ERR_WRONGGPU              = -18,  //!< The current GPU is not the one selected.
++  NVCV_ERR_UNSUPPORTEDDRIVER     = -19,  //!< The currently installed graphics driver is not supported
++  NVCV_ERR_MODELDEPENDENCIES     = -20,  //!< There is no model with dependencies that match this system
++  NVCV_ERR_PARSE                 = -21,  //!< There has been a parsing or syntax error while reading a file
++  NVCV_ERR_MODELSUBSTITUTION     = -22,  //!< The specified model does not exist and has been substituted.
++  NVCV_ERR_READ                  = -23,  //!< An error occurred while reading a file.
++  NVCV_ERR_WRITE                 = -24,  //!< An error occurred while writing a file.
++  NVCV_ERR_PARAMREADONLY         = -25,  //!< The selected parameter is read-only.
++  NVCV_ERR_TRT_ENQUEUE           = -26,  //!< TensorRT enqueue failed.
++  NVCV_ERR_TRT_BINDINGS          = -27,  //!< Unexpected TensorRT bindings.
++  NVCV_ERR_TRT_CONTEXT           = -28,  //!< An error occurred while creating a TensorRT context.
++  NVCV_ERR_TRT_INFER             = -29,  ///< The was a problem creating the inference engine.
++  NVCV_ERR_TRT_ENGINE            = -30,  ///< There was a problem deserializing the inference runtime engine.
++  NVCV_ERR_NPP                   = -31,  //!< An error has occurred in the NPP library.
++  NVCV_ERR_CONFIG                = -32,  //!< No suitable model exists for the specified parameter configuration.
++  NVCV_ERR_TOOSMALL              = -33,  //!< A supplied parameter or buffer is not large enough.
++  NVCV_ERR_TOOBIG                = -34,  //!< A supplied parameter is too big.
++  NVCV_ERR_WRONGSIZE             = -35,  //!< A supplied parameter is not the expected size.
++  NVCV_ERR_OBJECTNOTFOUND        = -36,  //!< The specified object was not found.
++  NVCV_ERR_SINGULAR              = -37,  //!< A mathematical singularity has been encountered.
++  NVCV_ERR_NOTHINGRENDERED       = -38,  //!< Nothing was rendered in the specified region.
++  NVCV_ERR_CONVERGENCE           = -39,  //!< An iteration did not converge satisfactorily.
++
++  NVCV_ERR_OPENGL                = -98,  //!< An OpenGL error has occurred.
++  NVCV_ERR_DIRECT3D              = -99,  //!< A Direct3D error has occurred.
++
++  NVCV_ERR_CUDA_BASE             = -100,  //!< CUDA errors are offset from this value.
++  NVCV_ERR_CUDA_VALUE            = -101,  //!< A CUDA parameter is not within the acceptable range.
++  NVCV_ERR_CUDA_MEMORY           = -102,  //!< There is not enough CUDA memory for the requested operation.
++  NVCV_ERR_CUDA_PITCH            = -112,  //!< A CUDA pitch is not within the acceptable range.
++  NVCV_ERR_CUDA_INIT             = -127,  //!< The CUDA driver and runtime could not be initialized.
++  NVCV_ERR_CUDA_LAUNCH           = -819,  //!< The CUDA kernel launch has failed.
++  NVCV_ERR_CUDA_KERNEL           = -309,  //!< No suitable kernel image is available for the device.
++  NVCV_ERR_CUDA_DRIVER           = -135,  //!< The installed NVIDIA CUDA driver is older than the CUDA runtime library.
++  NVCV_ERR_CUDA_UNSUPPORTED      = -901,  //!< The CUDA operation is not supported on the current system or device.
++  NVCV_ERR_CUDA_ILLEGAL_ADDRESS  = -800,  //!< CUDA tried to load or store on an invalid memory address.
++  NVCV_ERR_CUDA                  = -1099, //!< An otherwise unspecified CUDA error has been reported.
++} NvCV_Status;
++
++
++//! Get an error string corresponding to the given status code.
++//! \param[in]  code  the NvCV status code.
++//! \return     the corresponding string.
++//! \todo Find a cleaner way to do this, because NvCV_API doesn't work.
++#ifdef _WIN32
++  __declspec(dllexport) const char* __cdecl
++#else
++  const char* 
++#endif // _WIN32 or linux
++NvCV_GetErrorStringFromCode(NvCV_Status code);
++
++
++#ifdef __cplusplus
++}
++#endif // __cplusplus
++
++#endif // __NVCVSTATUS_H__
+diff --git a/video/filter/nvvfx/nvVideoEffects.h b/video/filter/nvvfx/nvVideoEffects.h
+new file mode 100644
+index 0000000..df60a27
+--- /dev/null
++++ b/video/filter/nvvfx/nvVideoEffects.h
+@@ -0,0 +1,261 @@
++/*###############################################################################
++#
++# Copyright (c) 2020 NVIDIA Corporation
++#
++# Permission is hereby granted, free of charge, to any person obtaining a copy of
++# this software and associated documentation files (the "Software"), to deal in
++# the Software without restriction, including without limitation the rights to
++# use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
++# the Software, and to permit persons to whom the Software is furnished to do so,
++# subject to the following conditions:
++#
++# The above copyright notice and this permission notice shall be included in all
++# copies or substantial portions of the Software.
++#
++# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
++# FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
++# COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
++# IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
++# CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
++#
++###############################################################################*/
++
++#ifndef __NVVIDEO_EFFECTS_H__
++#define __NVVIDEO_EFFECTS_H__
++
++#include "nvCVImage.h"
++
++#ifndef NvVFX_API
++  #ifdef _WIN32
++    #ifdef NVVFX_API_EXPORT
++      #define NvVFX_API __declspec(dllexport) __cdecl
++    #else
++      #define NvVFX_API
++    #endif
++  #else //if linux
++    #define NvVFX_API   // TODO: Linux code goes here
++  #endif // _WIN32 or linux
++#endif //NvVFX_API
++
++#ifdef __cplusplus
++extern "C" {
++#endif // __cplusplus
++
++// Forward declaration for CUDA API
++typedef struct CUstream_st* CUstream;
++
++//! We use strings as effect selectors.
++typedef const char* NvVFX_EffectSelector;
++
++//! We use strings as parameter selectors.
++typedef const char* NvVFX_ParameterSelector;
++
++//! Each effect instantiation is associated with an opaque handle.
++struct NvVFX_Object;
++typedef struct NvVFX_Object NvVFX_Object, *NvVFX_Handle;
++
++///! 
++///! Effect may use this handle to manage state objects.
++///! 
++struct NvVFX_StateObjectHandleBase;
++typedef struct NvVFX_StateObjectHandleBase* NvVFX_StateObjectHandle;
++
++//! Get the SDK version
++//! \param[in,out]  version    Pointer to an unsigned int set to 
++//!                            (major << 24) | (minor << 16) | (build << 8) | 0
++//! \return         NVCV_SUCCESS  if the version was set
++//! \return         NVCV_ERR_PARAMETER  if version was NULL
++NvCV_Status NvVFX_API NvVFX_GetVersion(unsigned int *version);
++
++//! Create an new instantiation of a video effect.
++//! \param[in]  code    the selector code for the desired video effect.
++//! \param[out] effect  a handle to the Video Effect instantiation.
++//! \return     NVCV_SUCCESS   if the operation was successful.
++NvCV_Status NvVFX_API NvVFX_CreateEffect(NvVFX_EffectSelector code, NvVFX_Handle *effect);
++
++
++//! Delete a previously allocated video effect.
++//! \param[in]  effect a handle to the video effect to be deleted.
++void NvVFX_API NvVFX_DestroyEffect(NvVFX_Handle effect);
++
++
++//! Set the value of the selected parameter (unsigned int, int, float double, unsigned long long, void*, CUstream).
++//! \param[in,out]  effect      The effect to configure.
++//! \param[in]      paramName   The selector of the effect parameter to configure.
++//! \param[in]      val         The value to be assigned to the selected effect parameter.
++//! \return NVCV_SUCCESS       if the operation was successful.
++//! \return NVCV_ERR_EFFECT    if an invalid effect handle was supplied.
++//! \return NVCV_ERR_SELECTOR  if the chosen effect does not understand the specified selector and data type.
++//! \return NVCV_ERR_PARAMETER if the value was out of range.
++NvCV_Status NvVFX_API NvVFX_SetU32(NvVFX_Handle effect, NvVFX_ParameterSelector paramName, unsigned int val);
++NvCV_Status NvVFX_API NvVFX_SetS32(NvVFX_Handle effect, NvVFX_ParameterSelector paramName, int val);
++NvCV_Status NvVFX_API NvVFX_SetF32(NvVFX_Handle effect, NvVFX_ParameterSelector paramName, float val);
++NvCV_Status NvVFX_API NvVFX_SetF64(NvVFX_Handle effect, NvVFX_ParameterSelector paramName, double val);
++NvCV_Status NvVFX_API NvVFX_SetU64(NvVFX_Handle effect, NvVFX_ParameterSelector paramName, unsigned long long val);
++NvCV_Status NvVFX_API NvVFX_SetObject(NvVFX_Handle effect, NvVFX_ParameterSelector paramName, void *ptr);
++NvCV_Status NvVFX_API NvVFX_SetStateObjectHandleArray(NvVFX_Handle effect, NvVFX_ParameterSelector paramName, NvVFX_StateObjectHandle* handle);
++NvCV_Status NvVFX_API NvVFX_SetCudaStream(NvVFX_Handle effect, NvVFX_ParameterSelector paramName, CUstream stream);
++
++//! Set the selected image descriptor.
++//! A shallow copy of the descriptor is made (preserving the pixel pointer), so that an ephemeral NvVFXImage_Init()
++//! wrapper may be used in the call to NvVFX_SetImage() if desired, without having to preserve it for the lifetime
++//! of the effect. The effect does not take ownership of the pixel buffer.
++//! \param[in,out]  effect      The effect to configure.
++//! \param[in]      paramName   The selector of the effect image to configure.
++//! \param[in]      im          Pointer to the image descriptor to be used for the selected effect image.
++//!                             NULL clears the selected internal image descriptor.
++//! \return NVCV_SUCCESS       if the operation was successful.
++//! \return NVCV_ERR_EFFECT    if an invalid effect handle was supplied.
++//! \return NVCV_ERR_SELECTOR  if the chosen effect does not understand the specified image selector.
++//! \return NVCV_ERR_PARAMETER if an unexpected NULL pointer was supplied.
++NvCV_Status NvVFX_API NvVFX_SetImage(NvVFX_Handle effect, NvVFX_ParameterSelector paramName, NvCVImage *im);
++
++//! Set the value of the selected string, by making a copy in the effect handle.
++//! \param[in,out]  effect      The effect to configure.
++//! \param[in]      paramName   The selector of the effect string to configure.
++//! \param[in]      str         The value to be assigned to the selected effect string. NULL clears the selected string.
++//! \return NVCV_SUCCESS       if the operation was successful.
++//! \return NVCV_ERR_EFFECT    if an invalid effect handle was supplied.
++//! \return NVCV_ERR_SELECTOR  if the chosen effect does not understand the specified string selector.
++//! \return NVCV_ERR_PARAMETER if an unexpected NULL pointer was supplied.
++NvCV_Status NvVFX_API NvVFX_SetString(NvVFX_Handle effect, NvVFX_ParameterSelector paramName, const char *str);
++
++
++//! Get the value of the selected parameter (unsigned int, int, float double, unsigned long long, void*, CUstream).
++//! These are not typically used except for testing.
++//! \param[in]  effect    the effect to be queried.
++//! \param[in]  paramName the selector of the effect parameter to retrieve.
++//! \param[out] val       a place to store the retrieved parameter.
++//! \return NVCV_SUCCESS       if the operation was successful.
++//! \return NVCV_ERR_EFFECT    if an invalid effect handle was supplied.
++//! \return NVCV_ERR_SELECTOR  if the chosen effect does not understand the specified selector and data type.
++//! \return NVCV_ERR_PARAMETER if an unexpected NULL pointer was supplied.
++//! \note Typically, these are not used outside of testing.
++NvCV_Status NvVFX_API NvVFX_GetU32(NvVFX_Handle effect, NvVFX_ParameterSelector paramName, unsigned int *val);
++NvCV_Status NvVFX_API NvVFX_GetS32(NvVFX_Handle effect, NvVFX_ParameterSelector paramName, int *val);
++NvCV_Status NvVFX_API NvVFX_GetF32(NvVFX_Handle effect, NvVFX_ParameterSelector paramName, float *val);
++NvCV_Status NvVFX_API NvVFX_GetF64(NvVFX_Handle effect, NvVFX_ParameterSelector paramName, double *val);
++NvCV_Status NvVFX_API NvVFX_GetU64(NvVFX_Handle effect, NvVFX_ParameterSelector paramName, unsigned long long *val);
++NvCV_Status NvVFX_API NvVFX_GetObject(NvVFX_Handle effect, NvVFX_ParameterSelector paramName, void **ptr);
++NvCV_Status NvVFX_API NvVFX_GetCudaStream(NvVFX_Handle effect, NvVFX_ParameterSelector paramName, CUstream *stream);
++
++//! Get a copy of the selected image descriptor.
++//! If GetImage() is called before SetImage(), the returned descriptor will be filled with zeros.
++//! Otherwise, the values will be identical to that in the previous SetImage() call,
++//! with the exception of deletePtr, deleteProc and bufferBytes, which will be 0.
++//! \param[in]  effect    the effect to be queried.
++//! \param[in]  paramName the selector of the effect image to retrieve.
++//! \param[out] val       a place to store the selected image descriptor.
++//!                       A pointer to an empty NvCVImage (deletePtr==NULL) should be supplied to avoid memory leaks.
++//! \return NVCV_SUCCESS       if the operation was successful.
++//! \return NVCV_ERR_EFFECT    if an invalid effect handle was supplied.
++//! \return NVCV_ERR_SELECTOR  if the chosen effect does not understand the specified image selector.
++//! \return NVCV_ERR_PARAMETER if an unexpected NULL pointer was supplied.
++//! \note Typically, this is not used outside of testing.
++NvCV_Status NvVFX_API NvVFX_GetImage(NvVFX_Handle effect, NvVFX_ParameterSelector paramName, NvCVImage *im);
++
++//! Get the specified string.
++//! If GetString() is called before SetString(), the returned string will be empty.
++//! Otherwise, the string will be identical to that in the previous SetString() call,
++//! though it will be stored in a different location.
++//! \param[in]  effect    the effect to be queried.
++//! \param[in]  paramName the selector of the effect string to retrieve.
++//! \param[out] val       a place to store a pointer to the selected string.
++//! \return NVCV_SUCCESS       if the operation was successful.
++//! \return NVCV_ERR_EFFECT    if an invalid effect handle was supplied.
++//! \return NVCV_ERR_SELECTOR  if the chosen effect does not understand the specified string selector.
++//! \return NVCV_ERR_PARAMETER if an unexpected NULL pointer was supplied.
++//! \note Typically, this is not used outside of testing.
++NvCV_Status NvVFX_API NvVFX_GetString(NvVFX_Handle effect, NvVFX_ParameterSelector paramName, const char **str);
++
++//! Run the selected effect.
++//! \param[in]  effect     the effect object handle.
++//! \param[in]  async   run the effect asynchronously if nonzero; otherwise run synchronously.
++//! \todo       Should async instead be a pointer to a place to store a token that can be useful
++//!             for synchronizing two streams alter?
++//! \return     NVCV_SUCCESS     if the operation was successful.
++//! \return     NVCV_ERR_EFFECT  if an invalid effect handle was supplied.
++NvCV_Status NvVFX_API NvVFX_Run(NvVFX_Handle effect, int async);
++
++//! Load the model based on the set params.
++//! \param[in]  effect     the effect object handle.
++//! \return     NVCV_SUCCESS     if the operation was successful.
++//! \return     NVCV_ERR_EFFECT  if an invalid effect handle was supplied.
++NvCV_Status NvVFX_API NvVFX_Load(NvVFX_Handle effect);
++
++//! Wrapper for cudaStreamCreate(), if it is desired to avoid linking with the cuda lib.
++//! \param[out] stream  A place to store the newly allocated stream.
++//! \return     NVCV_SUCCESS         if the operation was successful,
++//!             NVCV_ERR_CUDA_VALUE  if not.
++NvCV_Status NvVFX_API NvVFX_CudaStreamCreate(CUstream *stream);
++
++//! Wrapper for cudaStreamDestroy(), if it is desired to avoid linking with the cuda lib.
++//! \param[in]  stream  The stream to destroy.
++//! \return     NVCV_SUCCESS         if the operation was successful,
++//!             NVCV_ERR_CUDA_VALUE  if not.
++NvCV_Status NvVFX_API NvVFX_CudaStreamDestroy(CUstream stream);
++
++//! Allocate the state object handle for a feature.
++//! \param[in]  effect   the effect object handle.
++//! \param[in]  handle   handle to the state object
++//! \return     NVCV_SUCCESS    if the operation was successful.
++//! \return     NVCV_ERR_EFFECT  if an invalid effect handle was supplied.
++//! \note This may depend on prior settings of parameters.
++NvCV_Status NvVFX_API NvVFX_AllocateState(NvVFX_Handle effect, NvVFX_StateObjectHandle* handle);
++
++//! Deallocate the state object handle for stateful feature.
++//! \param[in]  effect   the effect object handle.
++//! \param[in]  handle   handle to the state object
++//! \return     NVCV_SUCCESS    if the operation was successful.
++//! \return     NVCV_ERR_EFFECT  if an invalid effect handle was supplied.
++NvCV_Status NvVFX_API NvVFX_DeallocateState(NvVFX_Handle effect, NvVFX_StateObjectHandle handle);
++
++//! Reset the state object handle for stateful feature.
++//! \param[in]  effect   the effect object handle.
++//! \param[in]  handle   handle to the state object
++//! \return     NVCV_SUCCESS    if the operation was successful.
++//! \return     NVCV_ERR_EFFECT  if an invalid effect handle was supplied.
++NvCV_Status NvVFX_API NvVFX_ResetState(NvVFX_Handle effect, NvVFX_StateObjectHandle handle);
++
++
++// Filter selectors
++#define NVVFX_FX_TRANSFER               "Transfer"
++#define NVVFX_FX_GREEN_SCREEN           "GreenScreen"         // Green Screen 
++#define NVVFX_FX_BGBLUR                 "BackgroundBlur"     // Background blur
++#define NVVFX_FX_ARTIFACT_REDUCTION     "ArtifactReduction"   // Artifact Reduction  
++#define NVVFX_FX_SUPER_RES              "SuperRes"            // Super Res 
++#define NVVFX_FX_SR_UPSCALE             "Upscale"             // Super Res Upscale 
++#define NVVFX_FX_DENOISING              "Denoising"           // Denoising 
++
++// Parameter selectors
++#define NVVFX_INPUT_IMAGE_0             "SrcImage0"           //!< There may be multiple input images
++#define NVVFX_INPUT_IMAGE               NVVFX_INPUT_IMAGE_0   //!< but there is usually only one input image
++#define NVVFX_INPUT_IMAGE_1             "SrcImage1"           //!< Source Image 1
++#define NVVFX_OUTPUT_IMAGE_0            "DstImage0"           //!< There may be multiple output images
++#define NVVFX_OUTPUT_IMAGE              NVVFX_OUTPUT_IMAGE_0  //!< but there is usually only one output image
++#define NVVFX_MODEL_DIRECTORY           "ModelDir"            //!< The directory where the model may be found
++#define NVVFX_CUDA_STREAM               "CudaStream"          //!< The CUDA stream to use
++#define NVVFX_CUDA_GRAPH                "CudaGraph"           //!< Enable CUDA graph to use
++#define NVVFX_INFO                      "Info"                //!< Get info about the effects
++#define NVVFX_MAX_INPUT_WIDTH           "MaxInputWidth"       //!< Maximum width of the input supported
++#define NVVFX_MAX_INPUT_HEIGHT          "MaxInputHeight"      //!< Maximum height of the input supported
++#define NVVFX_MAX_NUMBER_STREAMS        "MaxNumberStreams"  //!< Maximum number of concurrent input streams
++#define NVVFX_SCALE                     "Scale"               //!< Scale factor
++#define NVVFX_STRENGTH                  "Strength"            //!< Strength for different filters
++#define NVVFX_STRENGTH_LEVELS           "StrengthLevels"      //!< Number of strength levels
++#define NVVFX_MODE                      "Mode"                //!< Mode for different filters
++#define NVVFX_TEMPORAL                  "Temporal"            //!< Temporal mode: 0=image, 1=video
++#define NVVFX_GPU                       "GPU"                 //!< Preferred GPU (optional)
++#define NVVFX_BATCH_SIZE                "BatchSize"           //!< Batch Size (default 1)
++#define NVVFX_MODEL_BATCH               "ModelBatch"          //!< The preferred batching model to use (default 1)
++#define NVVFX_STATE                     "State"               //!< State variable  
++#define NVVFX_STATE_SIZE                "StateSize"           //!< Number of bytes needed to store state  
++#define NVVFX_STATE_COUNT               "NumStateObjects"     //!< Number of active state object handles
++
++
++#ifdef __cplusplus
++}
++#endif // __cplusplus
++
++#endif // __NVVIDEO_EFFECTS_H__
+diff --git a/video/filter/vf_nvidia_vfg.c b/video/filter/vf_nvidia_vfg.c
+new file mode 100644
+index 0000000..a121b97
+--- /dev/null
++++ b/video/filter/vf_nvidia_vfg.c
+@@ -0,0 +1,473 @@
++/*
++ * This file is part of mpv.
++ *
++ * mpv is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ */
++
++#include <math.h>
++#include <stdio.h>
++
++#include "filters/filter.h"
++#include "filters/filter_internal.h"
++#include "filters/user_filters.h"
++#include "options/m_option.h"
++#include "video/filter/nvidia_vfg.h"
++#include "video/mp_image.h"
++#include "video/mp_image_pool.h"
++#include "video/sws_utils.h"
++
++struct opts {
++    int mode;
++    int multiplier;
++};
++
++struct priv {
++    struct opts *opts;
++    struct mp_image_pool *pool;
++    struct mp_image_pool *download_pool;
++    struct mp_sws_context *sws;
++
++    struct mpv_nvidia_vfg *vfg;
++    int vfg_format;
++    int vfg_width;
++    int vfg_height;
++    bool disabled;
++    bool warned;
++    bool previous_uploaded;
++
++    struct mp_image *previous;
++    struct mp_image *next;
++    struct mp_image *ready[8];
++    int ready_count;
++    int ready_pos;
++    struct mp_frame pending_frame;
++    bool has_pending_frame;
++    bool eof_pending;
++};
++
++static int frame_format(const struct mp_image *image)
++{
++    // Match the D3D11 upload format to avoid converting every SDR output frame.
++    return pl_color_space_is_hdr(&image->params.color) ?
++           IMGFMT_X2BGR10 : IMGFMT_BGRA;
++}
++
++static enum mpv_nvidia_vfg_format bridge_format(int imgfmt)
++{
++    return imgfmt == IMGFMT_X2BGR10 ? MPV_NVIDIA_VFG_RGB10A2 :
++                                     MPV_NVIDIA_VFG_BGRA8;
++}
++
++static void clear_ready(struct priv *p)
++{
++    for (int n = 0; n < p->ready_count; n++)
++        mp_image_unrefp(&p->ready[n]);
++    p->ready_count = 0;
++    p->ready_pos = 0;
++}
++
++static void reset(struct mp_filter *f)
++{
++    struct priv *p = f->priv;
++    mp_image_unrefp(&p->previous);
++    mp_image_unrefp(&p->next);
++    clear_ready(p);
++    mp_frame_unref(&p->pending_frame);
++    p->pending_frame = (struct mp_frame){0};
++    p->has_pending_frame = false;
++    p->eof_pending = false;
++    p->previous_uploaded = false;
++}
++
++static void destroy(struct mp_filter *f)
++{
++    struct priv *p = f->priv;
++    reset(f);
++    mpv_nvidia_vfg_destroy(&p->vfg);
++}
++
++static void disable_vfg(struct mp_filter *f, struct priv *p, const char *error)
++{
++    if (!p->warned) {
++        MP_WARN(f, "%s; passing video through without frame generation.\n",
++                error ? error : "NVIDIA VFX SDK unavailable");
++        p->warned = true;
++    }
++    mpv_nvidia_vfg_destroy(&p->vfg);
++    p->disabled = true;
++}
++
++static bool ensure_vfg(struct mp_filter *f, struct priv *p,
++                       const struct mp_image *image, int imgfmt)
++{
++    if (p->vfg && p->vfg_width == image->w && p->vfg_height == image->h &&
++        p->vfg_format == imgfmt)
++        return true;
++
++    mpv_nvidia_vfg_destroy(&p->vfg);
++    p->previous_uploaded = false;
++    char error[256] = {0};
++    p->vfg = mpv_nvidia_vfg_create(image->w, image->h,
++                                   bridge_format(imgfmt), p->opts->mode,
++                                   p->opts->multiplier,
++                                   error, sizeof(error));
++    if (!p->vfg) {
++        disable_vfg(f, p, error);
++        return false;
++    }
++
++    p->vfg_width = image->w;
++    p->vfg_height = image->h;
++    p->vfg_format = imgfmt;
++    return true;
++}
++
++static struct mp_image *convert_frame(struct priv *p, struct mp_image *image,
++                                      int imgfmt)
++{
++    // VFG accepts both hardware-decoded and software-decoded input. Only
++    // hardware images need downloading; mp_image_hw_download() returns NULL
++    // for ordinary software frames.
++    struct mp_image *source = image;
++    if (image->hwctx) {
++        source = mp_image_hw_download(image, p->download_pool);
++        if (!source)
++            return NULL;
++    }
++
++    struct mp_image *converted;
++    if (source->imgfmt == imgfmt) {
++        converted = source == image ? mp_image_new_ref(source) : source;
++    } else {
++        converted = mp_image_pool_get(p->pool, imgfmt, source->w, source->h);
++        if (converted)
++            mp_image_copy_attributes(converted, source);
++    }
++    if (!converted) {
++        if (source != image)
++            talloc_free(source);
++        return NULL;
++    }
++
++    converted->params.repr.sys = PL_COLOR_SYSTEM_RGB;
++    converted->params.repr.levels = PL_COLOR_LEVELS_FULL;
++    converted->params.repr.alpha = PL_ALPHA_INDEPENDENT;
++    if (source->imgfmt != imgfmt && mp_sws_scale(p->sws, converted, source) < 0) {
++        talloc_free(converted);
++        if (source != image)
++            talloc_free(source);
++        return NULL;
++    }
++
++    if (source != image && source != converted)
++        talloc_free(source);
++    return converted;
++}
++
++static bool valid_timestamps(const struct mp_image *previous,
++                             const struct mp_image *current, double *delta)
++{
++    if (previous->pts == MP_NOPTS_VALUE || current->pts == MP_NOPTS_VALUE ||
++        !isfinite(previous->pts) || !isfinite(current->pts))
++        return false;
++
++    *delta = current->pts - previous->pts;
++    if (*delta <= 0)
++        return false;
++
++    if (previous->pkt_duration > 0 && *delta > previous->pkt_duration * 2.0)
++        return false;
++
++    return true;
++}
++
++static struct mp_image *make_generated(struct priv *p, unsigned int index,
++                                       double delta)
++{
++    const int fmt = p->previous->imgfmt;
++    struct mp_image *generated = mp_image_pool_get(p->pool, fmt, p->previous->w,
++                                                  p->previous->h);
++    if (!generated)
++        return NULL;
++
++    mp_image_copy_attributes(generated, p->previous);
++    generated->params.repr.sys = PL_COLOR_SYSTEM_RGB;
++    generated->params.repr.levels = PL_COLOR_LEVELS_FULL;
++    generated->params.repr.alpha = PL_ALPHA_INDEPENDENT;
++    generated->pts = p->previous->pts + delta * index / p->opts->multiplier;
++    generated->pkt_duration = delta / p->opts->multiplier;
++
++    char error[256] = {0};
++    if (!mpv_nvidia_vfg_run(p->vfg, index,
++                            generated->planes[0], generated->stride[0],
++                            error, sizeof(error))) {
++        talloc_free(generated);
++        return NULL;
++    }
++
++    return generated;
++}
++
++static bool generate_pair(struct mp_filter *f, struct priv *p)
++{
++    double delta;
++    if (!p->previous || !p->next)
++        return false;
++
++    if (p->previous->w != p->next->w || p->previous->h != p->next->h ||
++        p->previous->imgfmt != p->next->imgfmt) {
++        MP_VERBOSE(f, "Skipping VFG frame pair with mismatched formats or dimensions.\n");
++        return false;
++    }
++
++    if (!valid_timestamps(p->previous, p->next, &delta)) {
++        MP_VERBOSE(f, "Skipping VFG frame pair with invalid timestamps: %.6f -> %.6f (duration %.6f).\n",
++                   p->previous->pts, p->next->pts, p->previous->pkt_duration);
++        return false;
++    }
++
++    char error[256] = {0};
++    if (!mpv_nvidia_vfg_set_inputs(p->vfg,
++                                   p->previous->planes[0],
++                                   p->previous->stride[0],
++                                   p->next->planes[0],
++                                   p->next->stride[0],
++                                   p->previous_uploaded,
++                                   error, sizeof(error))) {
++        disable_vfg(f, p, error);
++        return false;
++    }
++
++    struct mp_image *previous = p->previous;
++    for (int i = 1; i < p->opts->multiplier; i++) {
++        struct mp_image *generated = make_generated(p, i, delta);
++        if (!generated) {
++            for (int n = 0; n < p->ready_count; n++)
++                mp_image_unrefp(&p->ready[n]);
++            p->ready_count = 0;
++            disable_vfg(f, p, "NVIDIA VFG failed for a frame pair");
++            return false;
++        }
++        p->ready[p->ready_count++] = generated;
++    }
++
++    MP_VERBOSE(f, "NVIDIA VFG generated %d intermediate frame(s) for input pair (%.6f -> %.6f).\n",
++               p->opts->multiplier - 1, p->previous->pts, p->next->pts);
++
++    memmove(&p->ready[1], &p->ready[0],
++            p->ready_count * sizeof(p->ready[0]));
++    p->ready[0] = previous;
++    p->ready_count++;
++    p->previous = NULL;
++    p->previous_uploaded = true;
++    return true;
++}
++
++static void pass_through_pair(struct priv *p)
++{
++    clear_ready(p);
++    p->ready_pos = 0;
++    p->ready_count = 0;
++    if (p->previous)
++        p->ready[p->ready_count++] = p->previous;
++    if (p->next)
++        p->ready[p->ready_count++] = p->next;
++    p->previous = NULL;
++    p->next = NULL;
++    p->previous_uploaded = false;
++}
++
++static void promote_next(struct priv *p)
++{
++    clear_ready(p);
++    p->previous = p->next;
++    p->next = NULL;
++    if (!p->previous)
++        p->previous_uploaded = false;
++}
++
++static void write_ready(struct mp_filter *f, struct priv *p)
++{
++    struct mp_image *image = p->ready[p->ready_pos];
++    p->ready[p->ready_pos++] = NULL;
++    if (p->ready_pos == p->ready_count)
++        promote_next(p);
++    mp_pin_in_write(f->ppins[1], MAKE_FRAME(MP_FRAME_VIDEO, image));
++}
++
++static void pass_through_buffered(struct mp_filter *f, struct priv *p,
++                                  struct mp_frame frame)
++{
++    if (!p->previous) {
++        mp_pin_in_write(f->ppins[1], frame);
++        return;
++    }
++
++    p->ready[0] = p->previous;
++    p->previous = NULL;
++    p->ready_count = 1;
++    p->ready_pos = 0;
++    p->pending_frame = frame;
++    p->has_pending_frame = true;
++    write_ready(f, p);
++}
++
++static void process(struct mp_filter *f)
++{
++    struct priv *p = f->priv;
++
++    if (!mp_pin_in_needs_data(f->ppins[1]))
++        return;
++
++    if (p->ready_pos < p->ready_count) {
++        write_ready(f, p);
++        return;
++    }
++
++    if (p->eof_pending) {
++        p->eof_pending = false;
++        mp_pin_in_write(f->ppins[1], MAKE_FRAME(MP_FRAME_EOF, NULL));
++        return;
++    }
++
++    if (p->has_pending_frame) {
++        struct mp_frame frame = p->pending_frame;
++        p->pending_frame = (struct mp_frame){0};
++        p->has_pending_frame = false;
++        mp_pin_in_write(f->ppins[1], frame);
++        return;
++    }
++
++    if (p->disabled) {
++        if (p->previous) {
++            struct mp_image *previous = p->previous;
++            p->previous = NULL;
++            mp_pin_in_write(f->ppins[1], MAKE_FRAME(MP_FRAME_VIDEO, previous));
++            return;
++        }
++        mp_pin_transfer_data(f->ppins[1], f->ppins[0]);
++        return;
++    }
++
++    if (!mp_pin_out_request_data(f->ppins[0]))
++        return;
++
++    struct mp_frame frame = mp_pin_out_read(f->ppins[0]);
++    if (frame.type == MP_FRAME_NONE)
++        return;
++
++    if (frame.type == MP_FRAME_EOF) {
++        p->eof_pending = true;
++        if (p->previous) {
++            p->ready[0] = p->previous;
++            p->previous = NULL;
++            p->ready_count = 1;
++            p->ready_pos = 0;
++            write_ready(f, p);
++            return;
++        }
++        process(f);
++        return;
++    }
++
++    if (frame.type != MP_FRAME_VIDEO) {
++        if (p->previous) {
++            p->ready[0] = p->previous;
++            p->previous = NULL;
++            p->ready_count = 1;
++            p->ready_pos = 0;
++            p->pending_frame = frame;
++            p->has_pending_frame = true;
++            write_ready(f, p);
++        } else {
++            mp_pin_in_write(f->ppins[1], frame);
++        }
++        return;
++    }
++
++    struct mp_image *image = frame.data;
++    int imgfmt = frame_format(image);
++    if (!ensure_vfg(f, p, image, imgfmt)) {
++        pass_through_buffered(f, p, frame);
++        return;
++    }
++
++    struct mp_image *converted = convert_frame(p, image, imgfmt);
++    if (!converted) {
++        disable_vfg(f, p, "Could not convert a frame to an NVIDIA VFG format");
++        pass_through_buffered(f, p, frame);
++        return;
++    }
++
++    mp_image_unrefp(&image);
++
++    if (!p->previous) {
++        p->previous = converted;
++        mp_pin_out_request_data(f->ppins[0]);
++        return;
++    }
++
++    p->next = converted;
++    if (!generate_pair(f, p))
++        pass_through_pair(p);
++
++    if (p->ready_count)
++        write_ready(f, p);
++}
++
++static const struct mp_filter_info filter = {
++    .name = "nvidia-vfg",
++    .process = process,
++    .reset = reset,
++    .destroy = destroy,
++    .priv_size = sizeof(struct priv),
++};
++
++static struct mp_filter *create(struct mp_filter *parent, void *options)
++{
++    struct mp_filter *f = mp_filter_create(parent, &filter);
++    if (!f) {
++        talloc_free(options);
++        return NULL;
++    }
++
++    mp_filter_add_pin(f, MP_PIN_IN, "in");
++    mp_filter_add_pin(f, MP_PIN_OUT, "out");
++
++    struct priv *p = f->priv;
++    p->opts = talloc_steal(p, options);
++    p->pool = mp_image_pool_new(p);
++    p->download_pool = mp_image_pool_new(p);
++    p->sws = mp_sws_alloc(p);
++    MP_HANDLE_OOM(p->pool);
++    MP_HANDLE_OOM(p->download_pool);
++    MP_HANDLE_OOM(p->sws);
++    return f;
++}
++
++#define OPT_BASE_STRUCT struct opts
++static const m_option_t vf_opts_fields[] = {
++    {"mode", OPT_CHOICE(mode,
++        {"low", 0}, {"medium", 1}, {"high", 2})},
++    {"multiplier", OPT_CHOICE(multiplier,
++        {"2", 2}, {"3", 3}, {"4", 4}, {"5", 5},
++        {"6", 6}, {"7", 7}, {"8", 8})},
++    {0}
++};
++
++const struct mp_user_filter_entry vf_nvidia_vfg = {
++    .desc = {
++        .description = "NVIDIA Video Frame Generation (Video Effects SDK)",
++        .name = "nvidia-vfg",
++        .priv_size = sizeof(OPT_BASE_STRUCT),
++        .priv_defaults = &(const OPT_BASE_STRUCT) {
++            .mode = 1,
++            .multiplier = 2,
++        },
++        .options = vf_opts_fields,
++    },
++    .create = create,
++};
