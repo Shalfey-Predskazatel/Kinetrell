@@ -9,11 +9,11 @@
 
 Windows 10 / 11 x64. Полностью распакуйте ZIP и запустите EXE нужной редакции. Extract the full ZIP and launch the corresponding EXE.
 
-- **[VFG](https://github.com/Yamidashka/rtx-video-player/releases/download/v1.3.0/Kinetrell-VFG-v1.3.0-Windows-x64.zip)** · `RTX Video Player.exe` · Maxine VFX 1.3.0 + VFG
-- **[RIFE](https://github.com/Yamidashka/rtx-video-player/releases/download/v1.3.0/Kinetrell-RIFE-v1.3.0-Windows-x64.zip)** · `RTX Video Player RIFE.exe` · DirectML
-- **[Duo](https://github.com/Yamidashka/rtx-video-player/releases/download/v1.3.0/Kinetrell-Duo-v1.3.0-Windows-x64.zip)** · `RTX Video Player Combined.exe` · Maxine VFX 1.3.0 + DirectML
+- **[VFG](https://github.com/Yamidashka/kinetrell/releases/download/v1.3.0/Kinetrell-VFG-v1.3.0-Windows-x64.zip)** · `RTX Video Player.exe` · Maxine VFX 1.3.0 + VFG
+- **[RIFE](https://github.com/Yamidashka/kinetrell/releases/download/v1.3.0/Kinetrell-RIFE-v1.3.0-Windows-x64.zip)** · `RTX Video Player RIFE.exe` · DirectML
+- **[Duo](https://github.com/Yamidashka/kinetrell/releases/download/v1.3.0/Kinetrell-Duo-v1.3.0-Windows-x64.zip)** · `RTX Video Player Combined.exe` · Maxine VFX 1.3.0 + DirectML
 
-[SHA-256](https://github.com/Yamidashka/rtx-video-player/releases/download/v1.3.0/SHA256SUMS.txt) · [Русская инструкция](https://github.com/Yamidashka/rtx-video-player/blob/main/README.ru.md) · [Third-party terms](https://github.com/Yamidashka/rtx-video-player/blob/main/THIRD-PARTY.md)
+[SHA-256](https://github.com/Yamidashka/kinetrell/releases/download/v1.3.0/SHA256SUMS.txt) · [Русская инструкция](https://github.com/Yamidashka/kinetrell/blob/main/README.ru.md) · [Third-party terms](https://github.com/Yamidashka/kinetrell/blob/main/THIRD-PARTY.md)
 
 ---
 
