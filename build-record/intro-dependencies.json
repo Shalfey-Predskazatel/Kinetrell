@@ -1,0 +1,643 @@
+[
+  {
+    "name": "libavcodec",
+    "type": "pkgconfig",
+    "version": "63.24.100",
+    "compile_args": [],
+    "link_args": [
+      "C:/msys64/clang64/lib/libavcodec.dll.a"
+    ],
+    "include_directories": [],
+    "sources": [],
+    "extra_files": [],
+    "dependencies": [],
+    "depends": [],
+    "meson_variables": [
+      "libavcodec"
+    ]
+  },
+  {
+    "name": "libavfilter",
+    "type": "pkgconfig",
+    "version": "12.8.100",
+    "compile_args": [],
+    "link_args": [
+      "C:/msys64/clang64/lib/libavfilter.dll.a"
+    ],
+    "include_directories": [],
+    "sources": [],
+    "extra_files": [],
+    "dependencies": [],
+    "depends": [],
+    "meson_variables": [
+      "libavfilter"
+    ]
+  },
+  {
+    "name": "libavformat",
+    "type": "pkgconfig",
+    "version": "63.16.100",
+    "compile_args": [],
+    "link_args": [
+      "C:/msys64/clang64/lib/libavformat.dll.a"
+    ],
+    "include_directories": [],
+    "sources": [],
+    "extra_files": [],
+    "dependencies": [],
+    "depends": [],
+    "meson_variables": [
+      "libavformat"
+    ]
+  },
+  {
+    "name": "libavutil",
+    "type": "pkgconfig",
+    "version": "61.19.100",
+    "compile_args": [],
+    "link_args": [
+      "C:/msys64/clang64/lib/libavutil.dll.a"
+    ],
+    "include_directories": [],
+    "sources": [],
+    "extra_files": [],
+    "dependencies": [],
+    "depends": [],
+    "meson_variables": [
+      "libavutil"
+    ]
+  },
+  {
+    "name": "libswresample",
+    "type": "pkgconfig",
+    "version": "7.6.100",
+    "compile_args": [],
+    "link_args": [
+      "C:/msys64/clang64/lib/libswresample.dll.a"
+    ],
+    "include_directories": [],
+    "sources": [],
+    "extra_files": [],
+    "dependencies": [],
+    "depends": [],
+    "meson_variables": [
+      "libswresample"
+    ]
+  },
+  {
+    "name": "libswscale",
+    "type": "pkgconfig",
+    "version": "10.5.100",
+    "compile_args": [],
+    "link_args": [
+      "C:/msys64/clang64/lib/libswscale.dll.a"
+    ],
+    "include_directories": [],
+    "sources": [],
+    "extra_files": [],
+    "dependencies": [],
+    "depends": [],
+    "meson_variables": [
+      "libswscale"
+    ]
+  },
+  {
+    "name": "libplacebo",
+    "type": "pkgconfig",
+    "version": "7.387.0",
+    "compile_args": [
+      "-IC:/msys64/clang64/include/spirv_cross"
+    ],
+    "link_args": [
+      "C:/msys64/clang64/lib/libplacebo.dll.a"
+    ],
+    "include_directories": [],
+    "sources": [],
+    "extra_files": [],
+    "dependencies": [],
+    "depends": [],
+    "meson_variables": [
+      "libplacebo"
+    ]
+  },
+  {
+    "name": "libass",
+    "type": "pkgconfig",
+    "version": "0.17.5",
+    "compile_args": [
+      "-IC:/msys64/clang64/include/fribidi",
+      "-IC:/msys64/clang64/include/freetype2",
+      "-IC:/msys64/clang64/include/libpng16",
+      "-IC:/msys64/clang64/include/harfbuzz",
+      "-IC:/msys64/clang64/include/glib-2.0",
+      "-IC:/msys64/clang64/lib/glib-2.0/include"
+    ],
+    "link_args": [
+      "C:/msys64/clang64/lib/libass.dll.a"
+    ],
+    "include_directories": [],
+    "sources": [],
+    "extra_files": [],
+    "dependencies": [],
+    "depends": [],
+    "meson_variables": [
+      "libass"
+    ]
+  },
+  {
+    "name": "libcurl",
+    "type": "pkgconfig",
+    "version": "8.23.0",
+    "compile_args": [],
+    "link_args": [
+      "C:/msys64/clang64/lib/libcurl.dll.a"
+    ],
+    "include_directories": [],
+    "sources": [],
+    "extra_files": [],
+    "dependencies": [],
+    "depends": [],
+    "meson_variables": [
+      "libcurl"
+    ]
+  },
+  {
+    "name": "libcdio",
+    "type": "pkgconfig",
+    "version": "2.4.0",
+    "compile_args": [],
+    "link_args": [
+      "C:/msys64/clang64/lib/libcdio.dll.a",
+      "-lm",
+      "C:/msys64/clang64/lib/libwinmm.a",
+      "C:/msys64/clang64/lib/libiconv.dll.a"
+    ],
+    "include_directories": [],
+    "sources": [],
+    "extra_files": [],
+    "dependencies": [],
+    "depends": [],
+    "meson_variables": [
+      "cdio"
+    ]
+  },
+  {
+    "name": "libcdio_paranoia",
+    "type": "pkgconfig",
+    "version": "10.2+2.0.2",
+    "compile_args": [],
+    "link_args": [
+      "C:/msys64/clang64/lib/libcdio_paranoia.dll.a",
+      "C:/msys64/clang64/lib/libcdio_cdda.dll.a",
+      "C:/msys64/clang64/lib/libcdio.dll.a",
+      "-lm",
+      "C:/msys64/clang64/lib/libwinmm.a",
+      "C:/msys64/clang64/lib/libiconv.dll.a"
+    ],
+    "include_directories": [],
+    "sources": [],
+    "extra_files": [],
+    "dependencies": [],
+    "depends": [],
+    "meson_variables": [
+      "cdda"
+    ]
+  },
+  {
+    "name": "dvdread",
+    "type": "pkgconfig",
+    "version": "7.1.1",
+    "compile_args": [],
+    "link_args": [
+      "C:/msys64/clang64/lib/libdvdread.dll.a"
+    ],
+    "include_directories": [],
+    "sources": [],
+    "extra_files": [],
+    "dependencies": [],
+    "depends": [],
+    "meson_variables": [
+      "dvdread"
+    ]
+  },
+  {
+    "name": "dvdnav",
+    "type": "pkgconfig",
+    "version": "7.0.0",
+    "compile_args": [],
+    "link_args": [
+      "C:/msys64/clang64/lib/libdvdnav.dll.a"
+    ],
+    "include_directories": [],
+    "sources": [],
+    "extra_files": [],
+    "dependencies": [],
+    "depends": [],
+    "meson_variables": [
+      "dvdnav"
+    ]
+  },
+  {
+    "name": "iconv",
+    "type": "system",
+    "version": "unknown",
+    "compile_args": [],
+    "link_args": [
+      "-liconv"
+    ],
+    "include_directories": [],
+    "sources": [],
+    "extra_files": [],
+    "dependencies": [],
+    "depends": [],
+    "meson_variables": [
+      "iconv"
+    ]
+  },
+  {
+    "name": "mujs",
+    "type": "pkgconfig",
+    "version": "1.3.11",
+    "compile_args": [
+      "-I/clang64/include"
+    ],
+    "link_args": [
+      "C:/msys64/clang64/lib/libmujs.dll.a"
+    ],
+    "include_directories": [],
+    "sources": [],
+    "extra_files": [],
+    "dependencies": [],
+    "depends": [],
+    "meson_variables": [
+      "javascript"
+    ]
+  },
+  {
+    "name": "lcms2",
+    "type": "pkgconfig",
+    "version": "2.20",
+    "compile_args": [],
+    "link_args": [
+      "C:/msys64/clang64/lib/liblcms2.dll.a",
+      "C:/msys64/clang64/lib/liblcms2_fast_float.dll.a"
+    ],
+    "include_directories": [],
+    "sources": [],
+    "extra_files": [],
+    "dependencies": [],
+    "depends": [],
+    "meson_variables": [
+      "lcms2"
+    ]
+  },
+  {
+    "name": "libarchive",
+    "type": "pkgconfig",
+    "version": "3.8.11",
+    "compile_args": [],
+    "link_args": [
+      "C:/msys64/clang64/lib/libarchive.dll.a"
+    ],
+    "include_directories": [],
+    "sources": [],
+    "extra_files": [],
+    "dependencies": [],
+    "depends": [],
+    "meson_variables": [
+      "libarchive"
+    ]
+  },
+  {
+    "name": "libavdevice",
+    "type": "pkgconfig",
+    "version": "63.5.100",
+    "compile_args": [],
+    "link_args": [
+      "C:/msys64/clang64/lib/libavdevice.dll.a"
+    ],
+    "include_directories": [],
+    "sources": [],
+    "extra_files": [],
+    "dependencies": [],
+    "depends": [],
+    "meson_variables": [
+      "libavdevice"
+    ]
+  },
+  {
+    "name": "libbluray",
+    "type": "pkgconfig",
+    "version": "1.5.0",
+    "compile_args": [
+      "-IC:/msys64/clang64/include/freetype2",
+      "-IC:/msys64/clang64/include/libpng16",
+      "-IC:/msys64/clang64/include/harfbuzz",
+      "-IC:/msys64/clang64/include/glib-2.0",
+      "-IC:/msys64/clang64/lib/glib-2.0/include",
+      "-IC:/msys64/clang64/include/libxml2"
+    ],
+    "link_args": [
+      "C:/msys64/clang64/lib/libbluray.dll.a"
+    ],
+    "include_directories": [],
+    "sources": [],
+    "extra_files": [],
+    "dependencies": [],
+    "depends": [],
+    "meson_variables": [
+      "libbluray"
+    ]
+  },
+  {
+    "name": "lua5.1",
+    "type": "pkgconfig",
+    "version": "5.1.5",
+    "compile_args": [
+      "-IC:/msys64/clang64/include/lua5.1"
+    ],
+    "link_args": [
+      "C:/msys64/clang64/lib/liblua5.1.dll.a",
+      "-lm"
+    ],
+    "include_directories": [],
+    "sources": [],
+    "extra_files": [],
+    "dependencies": [],
+    "depends": [],
+    "meson_variables": [
+      "lua"
+    ]
+  },
+  {
+    "name": "rubberband",
+    "type": "pkgconfig",
+    "version": "4.0.0",
+    "compile_args": [],
+    "link_args": [
+      "C:/msys64/clang64/lib/librubberband.dll.a",
+      "C:/msys64/clang64/lib/libfftw3.dll.a",
+      "C:/msys64/clang64/lib/libsamplerate.dll.a"
+    ],
+    "include_directories": [],
+    "sources": [],
+    "extra_files": [],
+    "dependencies": [],
+    "depends": [],
+    "meson_variables": [
+      "rubberband"
+    ]
+  },
+  {
+    "name": "sdl2",
+    "type": "pkgconfig",
+    "version": "2.32.74",
+    "compile_args": [
+      "-IC:/msys64/clang64/include/SDL2"
+    ],
+    "link_args": [
+      "C:/msys64/clang64/lib/libmingw32.a",
+      "C:/msys64/clang64/lib/libSDL2main.a",
+      "C:/msys64/clang64/lib/libSDL2.dll.a",
+      "-mwindows"
+    ],
+    "include_directories": [],
+    "sources": [],
+    "extra_files": [],
+    "dependencies": [],
+    "depends": [],
+    "meson_variables": [
+      "sdl2"
+    ]
+  },
+  {
+    "name": "uchardet",
+    "type": "pkgconfig",
+    "version": "0.0.8",
+    "compile_args": [
+      "-IC:/msys64/clang64/include/uchardet"
+    ],
+    "link_args": [
+      "C:/msys64/clang64/lib/libuchardet.dll.a"
+    ],
+    "include_directories": [],
+    "sources": [],
+    "extra_files": [],
+    "dependencies": [],
+    "depends": [],
+    "meson_variables": [
+      "uchardet"
+    ]
+  },
+  {
+    "name": "vapoursynth-script",
+    "type": "pkgconfig",
+    "version": "65",
+    "compile_args": [
+      "-IC:/msys64/clang64/include/vapoursynth",
+      "-IC:/msys64/clang64/include/python3.14"
+    ],
+    "link_args": [
+      "C:/msys64/clang64/lib/libvapoursynth-script.dll.a",
+      "C:/msys64/clang64/lib/libvapoursynth.dll.a"
+    ],
+    "include_directories": [],
+    "sources": [],
+    "extra_files": [],
+    "dependencies": [],
+    "depends": [],
+    "meson_variables": [
+      "vapoursynth"
+    ]
+  },
+  {
+    "name": "zimg",
+    "type": "pkgconfig",
+    "version": "3.0.6",
+    "compile_args": [],
+    "link_args": [
+      "C:/msys64/clang64/lib/libzimg.dll.a"
+    ],
+    "include_directories": [],
+    "sources": [],
+    "extra_files": [],
+    "dependencies": [],
+    "depends": [],
+    "meson_variables": [
+      "zimg"
+    ]
+  },
+  {
+    "name": "zlib",
+    "type": "pkgconfig",
+    "version": "1.4",
+    "compile_args": [],
+    "link_args": [
+      "C:/msys64/clang64/lib/libz.dll.a"
+    ],
+    "include_directories": [],
+    "sources": [],
+    "extra_files": [],
+    "dependencies": [],
+    "depends": [],
+    "meson_variables": [
+      "zlib"
+    ]
+  },
+  {
+    "name": "caca",
+    "type": "pkgconfig",
+    "version": "0.99.beta20",
+    "compile_args": [],
+    "link_args": [
+      "C:/msys64/clang64/lib/libcaca.dll.a"
+    ],
+    "include_directories": [],
+    "sources": [],
+    "extra_files": [],
+    "dependencies": [],
+    "depends": [],
+    "meson_variables": [
+      "caca"
+    ]
+  },
+  {
+    "name": "libjpeg",
+    "type": "pkgconfig",
+    "version": "3.2.1",
+    "compile_args": [],
+    "link_args": [
+      "C:/msys64/clang64/lib/libjpeg.dll.a"
+    ],
+    "include_directories": [],
+    "sources": [],
+    "extra_files": [],
+    "dependencies": [],
+    "depends": [],
+    "meson_variables": [
+      "jpeg"
+    ]
+  },
+  {
+    "name": "shaderc",
+    "type": "pkgconfig",
+    "version": "2026.4.1",
+    "compile_args": [],
+    "link_args": [
+      "C:/msys64/clang64/lib/libshaderc_shared.dll.a"
+    ],
+    "include_directories": [],
+    "sources": [],
+    "extra_files": [],
+    "dependencies": [],
+    "depends": [],
+    "meson_variables": [
+      "shaderc"
+    ]
+  },
+  {
+    "name": "libsixel",
+    "type": "pkgconfig",
+    "version": "1.8.7-r2",
+    "compile_args": [],
+    "link_args": [
+      "C:/msys64/clang64/lib/libsixel.dll.a"
+    ],
+    "include_directories": [],
+    "sources": [],
+    "extra_files": [],
+    "dependencies": [],
+    "depends": [],
+    "meson_variables": [
+      "sixel"
+    ]
+  },
+  {
+    "name": "spirv-cross-c-shared",
+    "type": "pkgconfig",
+    "version": "0.68.0",
+    "compile_args": [
+      "-IC:/msys64/clang64/include/spirv_cross"
+    ],
+    "link_args": [
+      "C:/msys64/clang64/lib/libspirv-cross-c-shared.dll.a"
+    ],
+    "include_directories": [],
+    "sources": [],
+    "extra_files": [],
+    "dependencies": [],
+    "depends": [],
+    "meson_variables": [
+      "spirv_cross"
+    ]
+  },
+  {
+    "name": "gl",
+    "type": "system",
+    "version": "unknown",
+    "compile_args": [],
+    "link_args": [
+      "-lopengl32"
+    ],
+    "include_directories": [],
+    "sources": [],
+    "extra_files": [],
+    "dependencies": [],
+    "depends": [],
+    "meson_variables": [
+      "GL"
+    ]
+  },
+  {
+    "name": "vulkan",
+    "type": "pkgconfig",
+    "version": "1.4.363",
+    "compile_args": [],
+    "link_args": [
+      "C:/msys64/clang64/lib/libvulkan-1.dll.a"
+    ],
+    "include_directories": [],
+    "sources": [],
+    "extra_files": [],
+    "dependencies": [],
+    "depends": [],
+    "meson_variables": [
+      "vulkan"
+    ]
+  },
+  {
+    "name": "libva",
+    "type": "pkgconfig",
+    "version": "1.24.0",
+    "compile_args": [],
+    "link_args": [
+      "C:/msys64/clang64/lib/libva.dll.a"
+    ],
+    "include_directories": [],
+    "sources": [],
+    "extra_files": [],
+    "dependencies": [],
+    "depends": [],
+    "meson_variables": [
+      "libva"
+    ]
+  },
+  {
+    "name": "libva-win32",
+    "type": "pkgconfig",
+    "version": "1.24.0",
+    "compile_args": [],
+    "link_args": [
+      "C:/msys64/clang64/lib/libva_win32.dll.a",
+      "C:/msys64/clang64/lib/libva.dll.a"
+    ],
+    "include_directories": [],
+    "sources": [],
+    "extra_files": [],
+    "dependencies": [],
+    "depends": [],
+    "meson_variables": [
+      "vaapi_win32"
+    ]
+  }
+]

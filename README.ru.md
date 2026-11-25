@@ -1,37 +1,21 @@
-![RTX Video Player — редакции VFG и RIFE](assets/banner.png)
+![Kinetrell Duo by Shalfey Predskazatel](assets/kinetrell-duo-cover.png)
 
-# RTX Video Player
+# Kinetrell
 
-[English](README.md) · [Скачать v1.1.0](https://github.com/Yamidashka/rtx-video-player/releases/tag/v1.1.0)
+[English](README.md) · [Скачать последнюю версию](https://github.com/Yamidashka/rtx-video-player/releases/latest) · [Изменения](RELEASE-NOTES.md)
 
-Портативный проигрыватель для Windows на базе mpv с генерацией кадров, RTX Video Super Resolution и RTX Video HDR.
+Kinetrell (ранее RTX Video Player) — портативный проигрыватель на базе mpv для Windows 10 и 11 x64. Поддерживает генерацию кадров, NVIDIA RTX Video Super Resolution, RTX Video HDR и интерфейс на русском и английском.
 
-- **VFG** использует установленный NVIDIA Maxine Video Effects SDK с компонентом Video Frame Generation.
-- **RIFE** использует DirectML из архива. Включены модели 4.4, 4.6 и 4.17 Lite. Для модели 4.17 Lite можно подключить TensorRT.
-
-Скачайте ZIP в разделе [**Releases**](https://github.com/Yamidashka/rtx-video-player/releases/latest), распакуйте его целиком и запустите **RTX Video Player.exe** или **RTX Video Player RIFE.exe**. Кнопка **VFG** или **RIFE** открывает меню **Выкл., 2×, 3×, 4×, 5× и 6×**. Кнопка **RU / EN** меняет язык панели и меню генерации. Главное меню **☰** меняет язык при следующем запуске.
-
-Настройки сохраняются в папке проигрывателя. Новый файл, открытый через тот же EXE, заменяет текущее видео. Для RTX Video HDR включите HDR в Windows. Плавность зависит от разрешения, исходной частоты кадров, модели и видеокарты.
-
-[Сборка](BUILD.md) · [Подключение TensorRT](TENSORRT.md) · [Сторонние компоненты](THIRD-PARTY.md)
-
-## Скачать для Windows x64
-
-| Редакция | Готовая программа | Требования к генерации кадров |
+| Редакция | Что внутри | ZIP для Windows x64 |
 | --- | --- | --- |
-| VFG | [Скачать ZIP VFG](https://github.com/Yamidashka/rtx-video-player/releases/download/v1.1.0/RTX-Video-Player-VFG-v1.1.0.zip) | Отдельно установленный NVIDIA Maxine Video Effects SDK с компонентом VFG. |
-| RIFE | [Скачать ZIP RIFE](https://github.com/Yamidashka/rtx-video-player/releases/download/v1.1.0/RTX-Video-Player-RIFE-v1.1.0.zip) | DirectML и модели уже включены в архив. |
+| **VFG** | NVIDIA VFG и Maxine VFX 1.3.0 | [Скачать](https://github.com/Yamidashka/rtx-video-player/releases/download/v1.3.0/Kinetrell-VFG-v1.3.0-Windows-x64.zip) |
+| **RIFE** | DirectML и модели 4.4, 4.6 и 4.17 Lite | [Скачать](https://github.com/Yamidashka/rtx-video-player/releases/download/v1.3.0/Kinetrell-RIFE-v1.3.0-Windows-x64.zip) |
+| **Duo** | VFG и RIFE в одном плеере, Maxine и DirectML внутри | [Скачать](https://github.com/Yamidashka/rtx-video-player/releases/download/v1.3.0/Kinetrell-Duo-v1.3.0-Windows-x64.zip) |
 
-Распакуйте ZIP в папку с правом записи и запускайте EXE. Сохраняйте все файлы распакованной папки вместе. Архивы **Source code** на GitHub предназначены для работы с исходниками; для запуска скачивайте ZIP нужной редакции из таблицы.
+Распакуйте архив целиком. Запустите `RTX Video Player.exe` для VFG, `RTX Video Player RIFE.exe` для RIFE или `RTX Video Player Combined.exe` для Duo. Чтобы открыть видео, перетащите его на EXE или выберите плеер через «Открыть с помощью».
 
-Для RTX Video Super Resolution и RTX Video HDR нужна совместимая видеокарта NVIDIA RTX и драйвер. Доступность множителя в меню не гарантирует работу в реальном времени на любом разрешении.
+В Duo генератор выбирается первой кнопкой на панели. Режим «Авто» подбирает целый множитель под частоту кадров видео и монитора. Для ручного режима доступны 2×–6×. Меню качества, модели и разрешения открываются рядом с соответствующими кнопками.
 
-Контрольные суммы: [SHA256SUMS.txt](https://github.com/Yamidashka/rtx-video-player/releases/download/v1.1.0/SHA256SUMS.txt). Проверка в PowerShell:
+Для VFG нужны совместимая видеокарта NVIDIA RTX и драйвер. Для RTX Video HDR включите HDR в Windows. Если Windows сообщает об отсутствии `MSVCP140.dll` или `VCRUNTIME140.dll`, установите [Microsoft Visual C++ Redistributable x64](https://aka.ms/vc14/vc_redist.x64.exe).
 
-```powershell
-Get-FileHash .\RTX-Video-Player-RIFE-v1.1.0.zip -Algorithm SHA256
-```
-
-Обе редакции используют общие исходники проигрывателя и лаунчера из этого репозитория. Исходники изменённого mpv и сведения о лицензиях включены в ZIP. Условия лицензирования проекта: [LICENSE.md](LICENSE.md).
-
-Это независимый проект на базе mpv, а не официальный продукт NVIDIA.
+[Контрольные суммы](SHA256SUMS.txt) · [Сборка исходников](BUILD.md) · [Опциональный TensorRT](TENSORRT.md) · [Сторонние компоненты](THIRD-PARTY.md)

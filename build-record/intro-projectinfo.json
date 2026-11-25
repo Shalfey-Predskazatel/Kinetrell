@@ -1,0 +1,15 @@
+{
+  "version": "0.42.0-UNKNOWN",
+  "descriptive_name": "mpv",
+  "license": [
+    "GPL2+",
+    "LGPL2.1+"
+  ],
+  "license_files": [
+    "LICENSE.GPL",
+    "LICENSE.LGPL",
+    "Copyright"
+  ],
+  "subproject_dir": "subprojects",
+  "subprojects": []
+}

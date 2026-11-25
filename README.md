@@ -1,41 +1,23 @@
-![RTX Video Player — VFG and RIFE](assets/banner.png)
+![Kinetrell Duo by Shalfey Predskazatel](assets/kinetrell-duo-cover.png)
 
-# RTX Video Player
+# Kinetrell
 
-[Русский](README.ru.md) · [Download v1.1.0](https://github.com/Yamidashka/rtx-video-player/releases/tag/v1.1.0)
+[Русский](README.ru.md) · [Latest release](https://github.com/Yamidashka/rtx-video-player/releases/latest) · [Changelog](RELEASE-NOTES.md)
 
-A portable Windows player based on mpv, with frame generation, NVIDIA RTX Video Super Resolution and RTX Video HDR.
+Kinetrell (formerly RTX Video Player) is a portable mpv-based player for Windows 10 and 11 x64. It adds frame interpolation, NVIDIA RTX Video Super Resolution, RTX Video HDR and a Russian/English playback bar.
 
-| Edition | Frame generation | Runtime |
+| Edition | Frame generation | Windows x64 |
 | --- | --- | --- |
-| VFG | NVIDIA Video Frame Generation | Installed NVIDIA Maxine Video Effects SDK with the VFG feature |
-| RIFE | RIFE 4.4, 4.6 or 4.17 Lite | Bundled DirectML, with optional TensorRT for 4.17 Lite |
+| **VFG** | NVIDIA VFG · Maxine VFX 1.3.0 + VFG | [Download ZIP](https://github.com/Yamidashka/rtx-video-player/releases/download/v1.3.0/Kinetrell-VFG-v1.3.0-Windows-x64.zip) |
+| **RIFE** | RIFE 4.4 / 4.6 / 4.17 Lite · DirectML | [Download ZIP](https://github.com/Yamidashka/rtx-video-player/releases/download/v1.3.0/Kinetrell-RIFE-v1.3.0-Windows-x64.zip) |
+| **Duo** | VFG / RIFE / Off · Maxine VFX 1.3.0 + DirectML | [Download ZIP](https://github.com/Yamidashka/rtx-video-player/releases/download/v1.3.0/Kinetrell-Duo-v1.3.0-Windows-x64.zip) |
 
-Download an edition from [**Releases**](https://github.com/Yamidashka/rtx-video-player/releases/latest), extract all files, and launch **RTX Video Player.exe** or **RTX Video Player RIFE.exe**. The VFG or RIFE button opens the generation menu with **Off, 2×, 3×, 4×, 5× and 6×**. Click **RU / EN** to switch the panel and generation menus. Reopen the player to update the **☰** menu.
+Extract the entire ZIP into a writable folder and run the launcher listed below. Open a file through the launcher or drag it onto the EXE.
 
-The player saves settings in its portable configuration folder. Opening another video through the same EXE replaces the current video. For RTX Video HDR, enable HDR in Windows. Playback speed depends on video resolution, model and GPU.
+- **VFG** — `RTX Video Player.exe`. Maxine VFX and the VFG component are included. A compatible NVIDIA RTX GPU and driver are required.
+- **RIFE** — `RTX Video Player RIFE.exe`. The DirectML runtime and three models are included.
+- **Duo** — `RTX Video Player Combined.exe`. Choose VFG, RIFE or Off from the first button. Each generator remembers its quality and multiplier.
 
-[Инструкция на русском](README.ru.md) · [Build instructions](BUILD.md) · [Optional TensorRT](TENSORRT.md) · [Third-party components](THIRD-PARTY.md)
+Pick **Auto** to select an integer multiplier for the source and display refresh rate, or select **2×–6×** manually. For RTX Video HDR, enable HDR in Windows. High multipliers depend on the source, GPU and other enabled filters.
 
-## Downloads — Windows x64
-
-| Edition | Portable download | Choose this edition when… |
-| --- | --- | --- |
-| VFG | [Download VFG ZIP](https://github.com/Yamidashka/rtx-video-player/releases/download/v1.1.0/RTX-Video-Player-VFG-v1.1.0.zip) | You have NVIDIA Maxine Video Effects SDK with Video Frame Generation installed. |
-| RIFE | [Download RIFE ZIP](https://github.com/Yamidashka/rtx-video-player/releases/download/v1.1.0/RTX-Video-Player-RIFE-v1.1.0.zip) | You want the bundled DirectML frame interpolation runtime. |
-
-Download the portable ZIP, extract it to a writable folder, and run the launcher. The GitHub **Source code** archives contain the project sources, not the ready-to-run player. Keep the full extracted folder together.
-
-The editions share the player and launcher sources in this repository. RIFE uses neural frame interpolation; VFG uses NVIDIA's separately installed runtime. NVIDIA RTX hardware and a compatible driver are required for RTX Video Super Resolution and RTX Video HDR. Available multipliers do not guarantee real-time playback at every resolution.
-
-Verify downloads against [SHA256SUMS.txt](https://github.com/Yamidashka/rtx-video-player/releases/download/v1.1.0/SHA256SUMS.txt). In PowerShell:
-
-```powershell
-Get-FileHash .\RTX-Video-Player-RIFE-v1.1.0.zip -Algorithm SHA256
-```
-
-## Source and licensing
-
-See [BUILD.md](BUILD.md) for the upstream revision, patch and launcher build steps. Each portable ZIP includes the modified mpv source archive and third-party notices. Project licensing is described in [LICENSE.md](LICENSE.md).
-
-This is a community project based on mpv. It is not an official NVIDIA product.
+[Build instructions](BUILD.md) · [SHA-256 checksums](SHA256SUMS.txt) · [Optional TensorRT](TENSORRT.md) · [Third-party terms](THIRD-PARTY.md)

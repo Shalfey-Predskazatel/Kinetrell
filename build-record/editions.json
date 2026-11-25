@@ -1,0 +1,26 @@
+[
+  {
+    "edition": "Combined",
+    "launcher": "RTX Video Player Combined.exe",
+    "launcher_sha256": "80568ca46fbc1f1777817316920fdbfc28f0fd6686b7c341a44e56372051d2b3",
+    "mpv_sha256": "8ce15994192ef793654626bc6359070cae84afee9ba3cf658fe347eb4e42105c",
+    "source_tar_sha256": "31383468c045060efc2e7d7edc58a6149206f69d49b21f1c5f07e02b4ebd4078",
+    "runtime": "DirectML + Maxine VFX 1.3.0 + VFG"
+  },
+  {
+    "edition": "RIFE",
+    "launcher": "RTX Video Player RIFE.exe",
+    "launcher_sha256": "79704523a08b4ebfc31874524b4736655343bd633c694747bce9d68128b41ca1",
+    "mpv_sha256": "8ce15994192ef793654626bc6359070cae84afee9ba3cf658fe347eb4e42105c",
+    "source_tar_sha256": "31383468c045060efc2e7d7edc58a6149206f69d49b21f1c5f07e02b4ebd4078",
+    "runtime": "DirectML"
+  },
+  {
+    "edition": "VFG",
+    "launcher": "RTX Video Player.exe",
+    "launcher_sha256": "b7aae5f08844b7a92b0572fd311a086865270a7d78a82d95ada9dfb6ece7062f",
+    "mpv_sha256": "0549433dcd7abc527e1521b1376af84dca0cca5617cebd11201fc4c9280970bd",
+    "source_tar_sha256": "287b314737a3592d72df93cf9e745170c0abaf42ab6173d42acdb8579494123f",
+    "runtime": "Maxine VFX 1.3.0 + VFG"
+  }
+]

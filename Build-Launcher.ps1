@@ -1,11 +1,14 @@
 param(
-    [Parameter(Mandatory)][ValidateSet('VFG', 'RIFE')][string] $Edition,
+    [Parameter(Mandatory)][ValidateSet('VFG', 'RIFE', 'Combined')][string] $Edition,
     [Parameter(Mandatory)][string] $Destination
 )
 
 $ErrorActionPreference = 'Stop'
 $target = (New-Item -ItemType Directory -Path $Destination -Force).FullName
-if ($Edition -eq 'RIFE') {
+if ($Edition -eq 'Combined') {
+    $source = 'launcher-rife.c'
+    $name = 'RTX Video Player Combined.exe'
+} elseif ($Edition -eq 'RIFE') {
     $source = 'launcher-rife.c'
     $name = 'RTX Video Player RIFE.exe'
 } else {

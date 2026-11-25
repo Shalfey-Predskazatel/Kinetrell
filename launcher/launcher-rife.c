@@ -270,8 +270,12 @@ static bool configure_rife_runtime(const wchar_t *root)
     free(path);
     return ok;
 }
+#include "maxine-runtime.h"
+
 static int start_player(const struct location *place, wchar_t **files, int count)
 {
+    if (!configure_portable_maxine(place->root))
+        return report_error(L"Не удалось подключить портативную среду Maxine.");
     if (!configure_rife_runtime(place->root))
         return report_error(L"Не удалось загрузить среду RIFE. Распакуйте архив целиком.");
     wchar_t command[COMMAND_CAP], config[PATH_CAP];

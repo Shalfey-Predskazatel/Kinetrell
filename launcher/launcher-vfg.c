@@ -248,8 +248,12 @@ static int forward_files(const struct location *place, HANDLE process,
     return 1;
 }
 
+#include "maxine-runtime.h"
+
 static int start_player(const struct location *place, wchar_t **files, int count)
 {
+    if (!configure_portable_maxine(place->root))
+        return report_error(L"Не удалось подключить портативную среду Maxine.");
     wchar_t command[COMMAND_CAP], config[PATH_CAP];
     if (swprintf(config, PATH_CAP, L"--config-dir=%ls", place->config) < 0)
         return report_error(L"Слишком длинный путь к папке плеера.");

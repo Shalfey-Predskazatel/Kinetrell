@@ -1,0 +1,5 @@
+Tool versions on the snapshot machine
+Meson 1.12.1
+Ninja 1.13.2
+clang version 23.1.5 (https://github.com/msys2/MINGW-packages efc96badda99c076509ef01986c673d1cd30f725)
+NVIDIA GeForce RTX 5060 Laptop GPU, 621.14

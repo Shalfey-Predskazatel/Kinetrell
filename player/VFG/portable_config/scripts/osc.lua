@@ -5,6 +5,7 @@ local tr = locale.text
 local assdraw = require 'mp.assdraw'
 local msg = require 'mp.msg'
 local opt = require 'mp.options'
+local utils = require 'mp.utils'
 
 --
 -- Parameters
@@ -801,6 +802,82 @@ end
 
 local elements = {}
 local custom_button_content = {}
+local popup
+
+local function popup_geometry()
+    for _, element in ipairs(elements) do
+        if element.custom_button_index == popup.anchor then
+            local x1, y1, x2, y2 = get_hitbox_coords_geo(element.layout.geometry)
+            local width = math.min(174, osc_param.playresx - 12)
+            local height = 34 + #popup.items * 24
+            local x = limit_range(6, osc_param.playresx - width - 6, (x1 + x2 - width) / 2)
+            local y = y1 - height - 6
+            if y < 6 then
+                y = limit_range(6, osc_param.playresy - height - 6, y2 + 6)
+            end
+            return x, y, width, height
+        end
+    end
+end
+
+local function popup_row(x, y, width)
+    local mx, my = get_virt_mouse_pos()
+    if mx < x or mx >= x + width or my < y + 30 then return nil end
+    local row = math.floor((my - y - 30) / 24) + 1
+    return row <= #popup.items and row or nil
+end
+
+local function render_popup(ass)
+    local x, y, width, height = popup_geometry()
+    if not x then return end
+    local function rect(left, top, right, bottom, color)
+        ass:new_event()
+        ass:append("{\\an7\\pos(0,0)\\bord0\\shad0\\1c&H" .. color .. "&}")
+        ass:draw_start()
+        ass:rect_cw(left, top, right, bottom)
+        ass:draw_stop()
+    end
+    local function text(label, left, top, size, color)
+        ass:new_event()
+        ass:pos(left, top)
+        ass:append(string.format("{\\an4\\fnSegoe UI\\fs%d\\bord0\\shad0\\1c&H%s&}", size, color))
+        ass:append(mp.command_native({"escape-ass", label}))
+    end
+    local hover = popup_row(x, y, width)
+    rect(x - 1, y - 1, x + width + 1, y + height + 1, "62544A")
+    rect(x, y, x + width, y + height, "27221E")
+    text(popup.title, x + 11, y + 15, 15, "DDD1C3")
+    for index, label in ipairs(popup.items) do
+        local top = y + 30 + (index - 1) * 24
+        if index == (hover or popup.cursor) then
+            rect(x + 4, top, x + width - 4, top + 24, "51443A")
+        end
+        if index == popup.selected then text("✓", x + 10, top + 12, 14, "F5D29E") end
+        text(label, x + 29, top + 12, 17, "FFFFFF")
+    end
+end
+
+local function close_popup()
+    if not popup then return end
+    popup = nil
+    mp.disable_key_bindings("rtx-popup")
+    request_tick()
+end
+
+local function choose_popup(index)
+    local current = popup
+    close_popup()
+    if current and index then
+        mp.commandv("script-message-to", "rtx_video_controls", "rtx-popup-choice", current.token, index)
+    end
+end
+
+local function move_popup(direction)
+    if not popup then return end
+    popup.cursor = (popup.cursor - 1 + direction) % #popup.items + 1
+    request_tick()
+end
+
 
 local function update_slider(element)
     local elem_geo = element.layout.geometry
@@ -2741,6 +2818,7 @@ local function osc_init()
             break
         end
         ne = new_element("custom_button_" .. i, "button")
+        ne.custom_button_index = i
         ne.content = function()
             return custom_button_content[i] or content
         end
@@ -2978,6 +3056,7 @@ local function do_enable_keybindings()
 end
 
 local function enable_osc(enable)
+    if not enable then close_popup() end
     state.enabled = enable
     if enable then
         do_enable_keybindings()
@@ -3129,7 +3208,7 @@ local function render()
         osc_areas = {"input", "window-controls", "window-controls-title"}
         wc_areas = osc_areas
     end
-    run_autohide("showtime", hide_osc, osc_areas)
+    if not popup then run_autohide("showtime", hide_osc, osc_areas) end
     run_autohide("wc_showtime", hide_wc, wc_areas)
 
 
@@ -3140,6 +3219,8 @@ local function render()
     if state.osc_visible or state.wc_visible then
         render_elements(ass)
     end
+
+    if popup then render_popup(ass) end
 
     -- submit
     set_osd(state.osd, osc_param.playresy * osc_param.display_aspect,
@@ -3317,6 +3398,44 @@ mp.register_script_message("osc-tracklist", function(dur)
     end
     mp.command("show-text ${track-list} " .. (dur and dur * 1000 or ""))
 end)
+
+mp.set_key_bindings({
+    {"mouse_move", function()
+        state.mouse_in_window = true
+        request_tick()
+    end},
+    {"mouse_leave", function()
+        state.mouse_in_window = false
+        request_tick()
+    end},
+    {"MBTN_LEFT", function()
+        if not popup then return end
+        local x, y, width = popup_geometry()
+        choose_popup(x and popup_row(x, y, width))
+    end},
+    {"MBTN_RIGHT", close_popup},
+    {"ESC", close_popup},
+    {"UP", function() move_popup(-1) end},
+    {"DOWN", function() move_popup(1) end},
+    {"ENTER", function() if popup then choose_popup(popup.cursor) end end},
+}, "rtx-popup", "force")
+
+mp.register_script_message("osc-rtx-popup", function(payload)
+    local menu = utils.parse_json(payload)
+    if not state.enabled or state.idle or type(menu) ~= "table"
+        or type(menu.items) ~= "table" or #menu.items == 0 then return end
+    if popup and popup.anchor == menu.anchor then
+        close_popup()
+        return
+    end
+    menu.cursor = menu.selected
+    popup = menu
+    show_osc()
+    mp.enable_key_bindings("rtx-popup", "exclusive")
+    request_tick()
+end)
+
+mp.register_event("end-file", close_popup)
 
 mp.register_script_message("osc-custom-button", function(index, content)
     index = tonumber(index)
