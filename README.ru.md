@@ -1,8 +1,8 @@
-![Kinetrell Duo by Shalfey Predskazatel](assets/kinetrell-duo-cover.png)
+![Kinetrell Duo by Shalfey Predskazatel](assets/social-preview.png)
 
 # Kinetrell
 
-[English](README.md) · [Скачать последнюю версию](https://github.com/Shalfey-Predskazatel/Kinetrell/releases/latest) · [Изменения](RELEASE-NOTES.md)
+[English](README.md) · **Русский** · [Скачать последнюю версию](https://github.com/Shalfey-Predskazatel/Kinetrell/releases/latest) · [Изменения](RELEASE-NOTES.md)
 
 Kinetrell (ранее RTX Video Player) — портативный проигрыватель на базе mpv для Windows 10 и 11 x64. Поддерживает генерацию кадров, NVIDIA RTX Video Super Resolution, RTX Video HDR и интерфейс на русском и английском.
 

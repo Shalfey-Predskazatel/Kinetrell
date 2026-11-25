@@ -1,19 +1,30 @@
-# Kinetrell v1.3.0
+![Kinetrell Duo by Shalfey Predskazatel](https://raw.githubusercontent.com/Shalfey-Predskazatel/Kinetrell/main/assets/social-preview.png)
 
-- Added **Duo**, which switches between NVIDIA VFG, RIFE and Off and remembers separate settings for each generator.
-- Added automatic frame-generation multipliers and compact menus for quality, RIFE model and RTX SR resolution.
-- RTX SR's screen mode follows the display resolution. Changing filters on seekable media clears queued frames and resumes at the current position.
-- VFG and Duo include Maxine VFX 1.3.0. RIFE and Duo include the DirectML runtime and RIFE 4.4, 4.6 and 4.17 Lite models.
+# Kinetrell v1.3.0 — VFG, RIFE & Duo
 
-## Скачать / Downloads
+## English
 
-Windows 10 / 11 x64. Полностью распакуйте ZIP и запустите EXE нужной редакции. Extract the full ZIP and launch the corresponding EXE.
+- Added **Duo**, which switches between NVIDIA VFG, RIFE, and Off and remembers separate settings for each generator.
+- Added automatic frame-generation multipliers and compact menus for quality, the RIFE model, and RTX SR resolution.
+- RTX SR screen mode follows the display resolution. On seekable media, changing filters clears queued frames and resumes at the current position.
+- VFG and Duo include Maxine VFX 1.3.0. RIFE and Duo include the DirectML runtime and RIFE 4.4, 4.6, and 4.17 Lite models.
 
-- **[VFG](https://github.com/Shalfey-Predskazatel/Kinetrell/releases/download/v1.3.0/Kinetrell-VFG-v1.3.0-Windows-x64.zip)** · `RTX Video Player.exe` · Maxine VFX 1.3.0 + VFG
-- **[RIFE](https://github.com/Shalfey-Predskazatel/Kinetrell/releases/download/v1.3.0/Kinetrell-RIFE-v1.3.0-Windows-x64.zip)** · `RTX Video Player RIFE.exe` · DirectML
-- **[Duo](https://github.com/Shalfey-Predskazatel/Kinetrell/releases/download/v1.3.0/Kinetrell-Duo-v1.3.0-Windows-x64.zip)** · `RTX Video Player Combined.exe` · Maxine VFX 1.3.0 + DirectML
+## Русский
 
-[SHA-256](https://github.com/Shalfey-Predskazatel/Kinetrell/releases/download/v1.3.0/SHA256SUMS.txt) · [Русская инструкция](https://github.com/Shalfey-Predskazatel/Kinetrell/blob/main/README.ru.md) · [Third-party terms](https://github.com/Shalfey-Predskazatel/Kinetrell/blob/main/THIRD-PARTY.md)
+- Добавлена редакция **Duo**: переключение между NVIDIA VFG, RIFE и выключенной генерацией кадров. Для каждой технологии отдельно сохраняются настройки.
+- Добавлен автоматический выбор множителя генерации кадров и компактные меню качества, модели RIFE и разрешения RTX SR.
+- Режим экрана RTX SR подстраивается под разрешение дисплея. При смене фильтров на перематываемом видео очередь кадров очищается, воспроизведение продолжается с текущей позиции.
+- В VFG и Duo включён Maxine VFX 1.3.0. В RIFE и Duo включены DirectML Runtime и модели RIFE 4.4, 4.6 и 4.17 Lite.
+
+## Downloads / Скачать
+
+Windows 10 / 11 x64. Extract the complete ZIP and launch the EXE for the edition you want. / Windows 10 / 11 x64. Распакуйте ZIP целиком и запустите EXE нужной редакции.
+
+- **VFG** · `RTX Video Player.exe` · Maxine VFX 1.3.0 + VFG · [Download / Скачать](https://github.com/Shalfey-Predskazatel/Kinetrell/releases/download/v1.3.0/Kinetrell-VFG-v1.3.0-Windows-x64.zip)
+- **RIFE** · `RTX Video Player RIFE.exe` · DirectML · [Download / Скачать](https://github.com/Shalfey-Predskazatel/Kinetrell/releases/download/v1.3.0/Kinetrell-RIFE-v1.3.0-Windows-x64.zip)
+- **Duo** · `RTX Video Player Combined.exe` · Maxine VFX 1.3.0 + DirectML · [Download / Скачать](https://github.com/Shalfey-Predskazatel/Kinetrell/releases/download/v1.3.0/Kinetrell-Duo-v1.3.0-Windows-x64.zip)
+
+[SHA-256 checksums](https://github.com/Shalfey-Predskazatel/Kinetrell/releases/download/v1.3.0/SHA256SUMS.txt) · [Русская инструкция / Russian guide](https://github.com/Shalfey-Predskazatel/Kinetrell/blob/main/README.ru.md) · [Third-party terms](https://github.com/Shalfey-Predskazatel/Kinetrell/blob/main/THIRD-PARTY.md)
 
 ---
 
